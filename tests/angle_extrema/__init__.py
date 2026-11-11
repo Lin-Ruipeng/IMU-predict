@@ -1,0 +1,1 @@
+"""Angle-extrema integration tests."""

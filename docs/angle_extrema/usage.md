@@ -1,0 +1,171 @@
+# Angle-extrema analysis
+
+The `angle_extrema` module finds integrated-angle windows whose window-relative
+angle crosses configured bounds. It consumes the headerless
+`x_deg,y_deg,z_deg,elapsed_s` files produced by preprocessing; it never
+reintegrates angular velocity. See [`GLOSSARY.md`](../../GLOSSARY.md) for the
+domain terms and [`docs/windowing.md`](../windowing.md) for the project-wide
+window discretization contract.
+
+Use `uv run imup extrema --help`, `uv run imup extrema select --help`, and
+`uv run imup extrema run --help` for the authoritative command reference.
+
+## Select representative inputs
+
+The selection utility recursively groups integrated-angle files by their direct
+parent directory, sorts each group by `(physical row count, relative path)`, and
+selects one file with the nearest-rank rule:
+
+```text
+index = ceil(quantile * file_count) - 1
+```
+
+The current experiment uses the median file from each directory:
+
+```bash
+uv run imup extrema select \
+  --input-root outputs/preprocessing \
+  --quantile 0.5 \
+  --output outputs/angle_extrema/selections/q50.json
+```
+
+The report contains a copy-ready `selected_input_paths` array plus detailed row
+counts and the normalized selection configuration. It is an inspection report,
+not a special input to `extrema run`; copy the selected paths into the formal
+run configuration. Selection is based only on row count and does not silently
+exclude or replace files with known sampling gaps. Fewer than three files in a
+directory produces a warning but still selects the requested actual file.
+
+The equivalent selection JSON is:
+
+```json
+{
+  "input_root": "outputs/preprocessing",
+  "quantile": 0.5,
+  "output": "outputs/angle_extrema/selections/q50.json",
+  "force": false
+}
+```
+
+Run it with `uv run imup extrema select --config <path>`. JSON keys are strict,
+and `force: true` is required to replace an existing report.
+
+## Run an experiment
+
+A formal run configuration contains every effective parameter:
+
+```json
+{
+  "run_name": "median-q50-default-bounds",
+  "input_paths": [
+    "outputs/preprocessing/<directory>/<file>integrated_angle.csv"
+  ],
+  "window_duration_s": 1.0,
+  "stride_duration_s": 0.5,
+  "lower_bound_deg": -1.0,
+  "upper_bound_deg": 1.0,
+  "cutoff_frequencies_hz": [11.0, 9.0, 7.0, 5.0, 3.0],
+  "violation_plot_input_paths": [],
+  "save_filtered_csv": true,
+  "allow_external_input": false,
+  "force": false
+}
+```
+
+```bash
+uv run imup extrema run --config outputs/angle_extrema/run-config.json
+```
+
+`run_name` must start with an ASCII letter or number and may then contain ASCII
+letters, numbers, `.`, `_`, and `-`.
+
+`input_paths` accepts individual files and directories. A directory contributes
+only its direct `*integrated_angle.csv` children; analysis never recursively
+expands it. Repeating the same resolved file, including through overlapping
+file and directory inputs, is a configuration error.
+
+The command also supports the same complete set of named arguments:
+
+```bash
+uv run imup extrema run \
+  --run-name median-q50-default-bounds \
+  --input-paths "outputs/preprocessing/<directory>/<file>integrated_angle.csv" \
+  --window-duration-s 1 \
+  --stride-duration-s 0.5 \
+  --lower-bound-deg -1 \
+  --upper-bound-deg 1 \
+  --cutoff-frequencies-hz 11 9 7 5 3
+```
+
+Named arguments and `--config` are mutually exclusive. Paths in JSON resolve
+from the repository root. Inputs outside `outputs/preprocessing/` are reported
+and skipped unless `allow_external_input` or `--allow-external-input` is set;
+the override permits location only and never bypasses data validation.
+
+## Window and extrema semantics
+
+For each file, recover fixed `dt` from its synthetic `elapsed_s` axis and use:
+
+```text
+window_samples = ceil(window_duration_s / dt)
+stride_samples = ceil(stride_duration_s / dt)
+```
+
+All windows in the file have identical point counts. The incomplete tail is
+discarded, and a file shorter than one window succeeds with a visible warning.
+Within every complete window, subtract each axis's first value. Values strictly
+below `lower_bound_deg` or strictly above `upper_bound_deg` violate the range;
+values equal to a bound do not.
+
+The input must contain at least two rows, four finite numeric columns, an
+`elapsed_s` axis starting at zero, and strictly increasing fixed intervals
+within floating-point tolerance. The command does not repair or resample an
+invalid input.
+
+## Causal filtering
+
+Each configured cutoff creates a fourth-order Butterworth low-pass filter in
+second-order-section form. `scipy.signal.sosfilt` processes the complete signal
+before windowing, independently for each axis, with a first-sample steady-state
+initial condition. The operation is causal: it uses no future samples, applies
+no zero-phase correction, and retains the real filter delay.
+
+A cutoff must be positive, unique, and lower than the file's Nyquist frequency.
+An invalid file/cutoff variant is recorded as a failure while other files and
+valid variants continue. An empty cutoff array requests raw-only analysis.
+
+## Outputs
+
+Each run is published under:
+
+```text
+outputs/angle_extrema/runs/<run_name>/
+├── analysis_config.json
+├── extrema_results.json
+└── sources/
+    └── <preprocessing-relative-source>/
+        ├── raw_series.png
+        ├── filtered/
+        │   ├── lowpass_11hz.csv
+        │   └── ...
+        └── violation_windows/
+            ├── raw/
+            └── lowpass_11hz/
+```
+
+`raw_series.png` is the complete, unshifted integrated-angle signal: x/y/z share
+one Seaborn-styled plot with fixed colors and no bound lines. Filtered CSV files
+remain headerless `x_deg,y_deg,z_deg,elapsed_s` data. Filtered full-series plots
+are not generated.
+
+`extrema_results.json` contains per-file/per-variant window summaries, one
+record for every violating window, all three axes' minima and maxima, violated
+axes/directions, failures, warnings, and a `succeeded` or `failed` run status.
+By default no violation-window images are generated. Paths listed in
+`violation_plot_input_paths` receive one image per violating raw or filtered
+window; these images show window-relative x/y/z curves and both bound lines.
+
+Run construction occurs in a temporary directory. A completed attempt is then
+published as a whole, including a fully accounted `failed` attempt. An
+interrupted attempt is not published. Existing runs require `force: true`; the
+replacement is run-wide so removed cutoffs cannot leave stale artifacts.
