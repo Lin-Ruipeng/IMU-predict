@@ -226,6 +226,12 @@ def run_extrema_analysis(
                     data=data,
                     config=config,
                 )
+                _plot_raw_violation_timeline(
+                    source_output / "raw_violation_timeline.png",
+                    data,
+                    violations=source_violations,
+                    source_name=source.name,
+                )
                 summaries.append(summary)
                 violations.extend(source_violations)
                 if summary["total_windows"] == 0:
@@ -618,6 +624,83 @@ def _plot_raw_series(
         figure.savefig(destination, dpi=150, format="png")
     finally:
         plt.close(figure)
+
+
+def _plot_raw_violation_timeline(
+    destination: Path,
+    data: _AngleData,
+    *,
+    violations: list[dict[str, object]],
+    source_name: str,
+) -> None:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    sns.set_theme(style="whitegrid", context="notebook", palette="colorblind")
+    palette = sns.color_palette("colorblind", 3)
+    intervals_by_axis = _merged_violation_intervals(violations)
+    figure, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    try:
+        for index, axis in enumerate(_AXES):
+            plot_axes = axes[index]
+            sns.lineplot(
+                x=data.rows[:, 3],
+                y=data.rows[:, index],
+                estimator=None,
+                errorbar=None,
+                label=f"{axis} integrated angle",
+                color=palette[index],
+                ax=plot_axes,
+            )
+            for interval_index, (start, end) in enumerate(intervals_by_axis[axis]):
+                plot_axes.plot(
+                    [start, end],
+                    [0.0, 0.0],
+                    color="crimson",
+                    linewidth=4.0,
+                    solid_capstyle="butt",
+                    label=("raw violation coverage" if interval_index == 0 else None),
+                    zorder=5,
+                )
+            plot_axes.set_ylabel(f"{axis} angle (deg)")
+            plot_axes.legend(loc="best")
+        axes[-1].set_xlabel("Relative elapsed time (s)")
+        axes[-1].set_xlim(
+            float(data.rows[0, 3]),
+            float(data.rows[-1, 3] + data.sample_interval_s),
+        )
+        figure.suptitle(f"{source_name} | raw angle and violation coverage")
+        figure.tight_layout()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(destination, dpi=150, format="png")
+    finally:
+        plt.close(figure)
+
+
+def _merged_violation_intervals(
+    violations: list[dict[str, object]],
+) -> dict[str, list[tuple[float, float]]]:
+    merged_by_axis: dict[str, list[tuple[float, float]]] = {}
+    for axis in _AXES:
+        intervals = sorted(
+            (
+                cast(float, record["start_elapsed_s"]),
+                cast(float, record["end_elapsed_s_exclusive"]),
+            )
+            for record in violations
+            if axis in cast(Mapping[str, object], record["violations"])
+        )
+        merged: list[tuple[float, float]] = []
+        for start, end in intervals:
+            if not merged or (
+                start > merged[-1][1]
+                and not math.isclose(start, merged[-1][1], abs_tol=1e-12)
+            ):
+                merged.append((start, end))
+                continue
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        merged_by_axis[axis] = merged
+    return merged_by_axis
 
 
 def _plot_violation_windows(
