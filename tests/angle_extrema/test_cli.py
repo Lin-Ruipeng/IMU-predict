@@ -172,14 +172,9 @@ def test_run_uses_fixed_physical_windows_and_records_extrema(
     saved_config = json.loads(
         (run_dir / "analysis_config.json").read_text(encoding="utf-8")
     )
-    plot = (
-        run_dir
-        / "sources"
-        / "person"
-        / "session"
-        / "sampleintegrated_angle"
-        / "raw_series.png"
-    )
+    source_dir = run_dir / "sources" / "person" / "session" / "sampleintegrated_angle"
+    raw_plot = source_dir / "raw_series.png"
+    violation_timeline = source_dir / "raw_violation_timeline.png"
 
     assert exit_code == 0
     assert results["run_status"] == "succeeded"
@@ -215,7 +210,8 @@ def test_run_uses_fixed_physical_windows_and_records_extrema(
         "outputs/preprocessing/person/session/sampleintegrated_angle.csv"
     ]
     assert saved_config["cutoff_frequencies_hz"] == []
-    assert plot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert raw_plot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert violation_timeline.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert "SUMMARY: processed=1 failed=0" in capsys.readouterr().err
 
 
@@ -391,6 +387,17 @@ def test_named_run_arguments_save_the_same_complete_configuration(
             repository / "outputs/angle_extrema/runs/named-mode/analysis_config.json"
         ).read_text(encoding="utf-8")
     )
+    timeline = (
+        repository
+        / "outputs"
+        / "angle_extrema"
+        / "runs"
+        / "named-mode"
+        / "sources"
+        / "session"
+        / "sampleintegrated_angle"
+        / "raw_violation_timeline.png"
+    )
     assert exit_code == 0
     assert saved == {
         "run_name": "named-mode",
@@ -405,6 +412,7 @@ def test_named_run_arguments_save_the_same_complete_configuration(
         "allow_external_input": False,
         "force": False,
     }
+    assert timeline.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 @pytest.mark.parametrize(

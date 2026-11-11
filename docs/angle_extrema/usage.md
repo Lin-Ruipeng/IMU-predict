@@ -145,6 +145,7 @@ outputs/angle_extrema/runs/<run_name>/
 └── sources/
     └── <preprocessing-relative-source>/
         ├── raw_series.png
+        ├── raw_violation_timeline.png
         ├── filtered/
         │   ├── lowpass_11hz.csv
         │   └── ...
@@ -157,6 +158,14 @@ outputs/angle_extrema/runs/<run_name>/
 one Seaborn-styled plot with fixed colors and no bound lines. Filtered CSV files
 remain headerless `x_deg,y_deg,z_deg,elapsed_s` data. Filtered full-series plots
 are not generated.
+
+`raw_violation_timeline.png` preserves the unfiltered integrated-angle signal in
+three vertically stacked x/y/z panels with a shared elapsed-time axis. Each
+panel marks only that axis's raw violation time coverage at `y=0`. Overlapping
+or touching half-open violation windows are merged before plotting, so every red
+segment means that at least one raw violating window covers that time. The
+timeline is generated for every successfully analyzed source and does not
+replace `raw_series.png`.
 
 `extrema_results.json` contains per-file/per-variant window summaries, one
 record for every violating window, all three axes' minima and maxima, violated
