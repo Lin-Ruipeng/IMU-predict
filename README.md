@@ -35,6 +35,20 @@ uv run pre-commit run --all-files
 Pre-commit runs Ruff and Mypy on staged Python files. The full test suite runs
 in CI.
 
+## Gyroscope preprocessing
+
+Process the gyro files directly inside one `data/` subdirectory:
+
+```bash
+uv run imup preprocess --input-dir "data/<relative-path>"
+```
+
+Use `--force` to replace existing generated files, or pass a complete JSON
+configuration with `--config`. Results mirror the input path below
+`outputs/preprocessing/`. See
+[`docs/preprocessing/data-format.md`](docs/preprocessing/data-format.md) for the
+input, integration, output, and diagnostic contracts.
+
 ## Project layout
 
 ```text

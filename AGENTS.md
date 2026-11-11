@@ -17,6 +17,23 @@
   tests.
 - CI is the final gate for the full test suite, Ruff, and Mypy.
 
+## Observable operations
+
+- Surface every detected anomaly. Data-processing CLIs write `INFO`, `WARNING`,
+  or `ERROR` messages to stderr with the affected path and reason, followed by
+  a batch summary; reusable library code returns diagnostics or raises errors.
+- Require an explicit option before correcting names, applying fallbacks, or
+  replacing generated output.
+
+## Experiment CLI configuration
+
+- Every parameterized data-processing command supports either complete named
+  CLI arguments or a JSON object whose keys match those arguments. The two
+  input modes are mutually exclusive.
+- Resolve JSON paths from the repository root, reject unknown keys and invalid
+  types, and persist the normalized arguments beside generated output. A
+  command without generated output is exempt only from the persistence step.
+
 ## Agent skills
 
 ### Issue tracker
