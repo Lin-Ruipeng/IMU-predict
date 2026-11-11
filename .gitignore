@@ -16,6 +16,11 @@ wheels/
 .coverage
 htmlcov/
 
+# Local agent and credential configuration
+/.agents/
+/.aws/
+/.codex/
+
 # Local data and generated outputs
 /data/
 /outputs/
