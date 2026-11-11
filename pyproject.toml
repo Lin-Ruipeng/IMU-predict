@@ -1,0 +1,86 @@
+[project]
+name = "imup"
+version = "0.1.0"
+description = "Experiments and tools for IMU data analysis and prediction"
+readme = "README.md"
+authors = [
+    { name = "folin", email = "likeszm@foxmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.4",
+    "scipy>=1.18.1",
+    "seaborn>=0.13.2",
+]
+
+[project.optional-dependencies]
+cpu = ["torch>=2.11.0"]
+cu130 = ["torch>=2.11.0"]
+
+[project.scripts]
+imup = "imup:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "pre-commit>=4.7.0",
+    "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.4",
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cu130" },
+    ],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu130", extra = "cu130" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+extend-exclude = ["data", "outputs"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+strict = true
+warn_unreachable = true
+pretty = true
+show_error_codes = true
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["imup"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
