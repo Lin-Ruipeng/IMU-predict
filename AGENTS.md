@@ -34,6 +34,11 @@
   types, and persist the normalized arguments beside generated output. A
   command without generated output is exempt only from the persistence step.
 
+## Sliding windows
+
+- For any physical-duration window or stride, follow the project-wide
+  discretization and tail rules in `docs/windowing.md`.
+
 ## Agent skills
 
 ### Issue tracker

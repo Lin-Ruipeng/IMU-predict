@@ -49,6 +49,27 @@ configuration with `--config`. Results mirror the input path below
 [`docs/preprocessing/data-format.md`](docs/preprocessing/data-format.md) for the
 input, integration, output, and diagnostic contracts.
 
+## Angle-extrema analysis
+
+Select one median-length representative from each preprocessing directory:
+
+```bash
+uv run imup extrema select \
+  --input-root outputs/preprocessing \
+  --quantile 0.5 \
+  --output outputs/angle_extrema/selections/q50.json
+```
+
+Copy the reported paths into a formal run configuration, then analyze raw and
+causally filtered angle windows:
+
+```bash
+uv run imup extrema run --config outputs/angle_extrema/run-config.json
+```
+
+See [`docs/angle_extrema/usage.md`](docs/angle_extrema/usage.md) for the complete
+CLI, JSON, filtering, window, plotting, and output contracts.
+
 ## Project layout
 
 ```text
