@@ -8,9 +8,12 @@ from pathlib import Path
 from imup.angle_extrema import (
     AnalysisConfig,
     AngleExtremaError,
+    ComparisonConfig,
     SelectConfig,
     load_analysis_config,
+    load_comparison_config,
     load_select_config,
+    run_angle_comparison,
     run_extrema_analysis,
     select_representative_files,
 )
@@ -154,6 +157,48 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         help="atomically replace an existing run with the same name",
+    )
+
+    compare_parser = extrema_subparsers.add_parser(
+        "compare",
+        help="compare angle variants with the target integrated angle",
+    )
+    compare_source = compare_parser.add_mutually_exclusive_group(required=True)
+    compare_source.add_argument(
+        "--config",
+        type=Path,
+        help="complete JSON comparison configuration",
+    )
+    compare_source.add_argument(
+        "--analysis-run-name",
+        help="existing angle-extrema run to compare",
+    )
+    compare_parser.add_argument(
+        "--comparison-name",
+        help="ASCII comparison output identifier",
+    )
+    compare_parser.add_argument(
+        "--target-cutoff-hz",
+        type=float,
+        help="target integrated-angle cutoff (default: 11)",
+    )
+    compare_parser.add_argument(
+        "--comparison-cutoff-frequencies-hz",
+        nargs="*",
+        type=float,
+        help="filtered variants compared with the target (default: 3 5 7 9)",
+    )
+    compare_parser.add_argument(
+        "--include-raw",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="compare raw integrated angle with the target (default: true)",
+    )
+    compare_parser.add_argument(
+        "--force",
+        action="store_true",
+        default=None,
+        help="atomically replace an existing comparison output",
     )
     return parser
 
@@ -342,6 +387,60 @@ def _run_extrema_analysis(
     return result.exit_code
 
 
+def _run_extrema_comparison(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> int:
+    repository_root = find_repository_root()
+    config_path: Path | None = args.config
+    override_names = (
+        "analysis_run_name",
+        "comparison_name",
+        "target_cutoff_hz",
+        "comparison_cutoff_frequencies_hz",
+        "include_raw",
+        "force",
+    )
+    if config_path is not None:
+        if any(getattr(args, name) is not None for name in override_names):
+            parser.error("--config cannot be combined with comparison overrides")
+        config = load_comparison_config(config_path, repository_root=repository_root)
+    else:
+        if args.analysis_run_name is None or args.comparison_name is None:
+            parser.error(
+                "--analysis-run-name and --comparison-name are required without --config"
+            )
+        config = ComparisonConfig(
+            comparison_name=str(args.comparison_name),
+            analysis_run_name=str(args.analysis_run_name),
+            target_cutoff_hz=(
+                11.0 if args.target_cutoff_hz is None else float(args.target_cutoff_hz)
+            ),
+            comparison_cutoff_frequencies_hz=(
+                (3.0, 5.0, 7.0, 9.0)
+                if args.comparison_cutoff_frequencies_hz is None
+                else tuple(args.comparison_cutoff_frequencies_hz)
+            ),
+            include_raw=True if args.include_raw is None else bool(args.include_raw),
+            force=False if args.force is None else bool(args.force),
+        )
+    result = run_angle_comparison(config, repository_root=repository_root)
+    for warning in result.warnings:
+        _print_diagnostic("WARNING", warning.path, warning.message)
+    for failure in result.failures:
+        _print_diagnostic("ERROR", failure.path, failure.message)
+    _print_diagnostic("INFO", result.output_dir, "published angle comparison")
+    print(
+        "SUMMARY: "
+        f"processed={result.processed_sources} "
+        f"comparisons={result.comparisons} "
+        f"failed={len(result.failures)} "
+        f"warnings={len(result.warnings)}",
+        file=sys.stderr,
+    )
+    return result.exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -353,6 +452,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_extrema_select(args, parser)
         if args.command == "extrema" and args.extrema_command == "run":
             return _run_extrema_analysis(args, parser)
+        if args.command == "extrema" and args.extrema_command == "compare":
+            return _run_extrema_comparison(args, parser)
     except (PreprocessingError, AngleExtremaError) as error:
         _print_diagnostic("ERROR", error.path, str(error))
         return 2
