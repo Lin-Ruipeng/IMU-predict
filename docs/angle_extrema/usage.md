@@ -8,8 +8,9 @@ domain terms and [`docs/windowing.md`](../windowing.md) for the project-wide
 window discretization contract.
 
 Use `uv run imup extrema --help`, `uv run imup extrema select --help`,
-`uv run imup extrema run --help`, and `uv run imup extrema compare --help` for
-the authoritative command reference.
+`uv run imup extrema run --help`, `uv run imup extrema compare --help`, and
+`uv run imup extrema compare-violations --help` for the authoritative command
+reference.
 
 ## Select representative inputs
 
@@ -197,6 +198,76 @@ outputs/angle_extrema/comparisons/<comparison_name>/
 `delay_compensation.csv` records the shared tri-axis shift, direction,
 correlation, and retained time range for every source/variant pair. Existing
 output requires explicit `force: true`; replacement is run-wide.
+
+## Compare Target Violation Windows
+
+`extrema compare-violations` consumes both an existing angle-extrema run and
+its existing target-angle comparison. It selects only records whose signal
+variant is the 11 Hz Target Integrated Angle; violations detected in raw or
+other cutoff variants never select a window. The command reuses each source and
+comparator's full-series shared tri-axis shift from `delay_compensation.csv` and
+does not refilter or estimate a shift per window.
+
+A complete JSON request is:
+
+```json
+{
+  "comparison_name": "q50-target-angle",
+  "analysis_run_name": "q50-default-bounds",
+  "force": false
+}
+```
+
+```bash
+uv run imup extrema compare-violations --config <path>
+```
+
+The equivalent complete named-argument mode is:
+
+```bash
+uv run imup extrema compare-violations \
+  --comparison-name q50-target-angle \
+  --analysis-run-name q50-default-bounds
+```
+
+Every Target Violation Window produces one pairwise image for raw and each
+configured diagnostic cutoff. The target remains on its original window time
+grid. A comparator with signed shift `s` is queried at `target_time - s` by
+linear sub-sample interpolation. Each curve independently subtracts its first
+plotted three-axis sample, so complete-coverage curves all begin at `(0, 0)`.
+Both curves are solid, use stable variant-specific colors, and enclose a
+translucent difference band. Three vertically stacked x/y/z panels show both
+configured bound lines, and panels whose target axis triggered selection are
+marked `VIOLATION`. Figure titles disclose that delay compensation is applied
+but not its magnitude.
+
+At a source boundary, unavailable comparator data is not extrapolated or
+wrapped. The complete target window remains visible, while the comparator
+begins at its first available point and is rebased there. These images are
+recorded as `PARTIAL_COVERAGE` warnings.
+
+The command atomically publishes only this subtree and leaves the existing
+full-series comparison files untouched:
+
+```text
+outputs/angle_extrema/comparisons/<comparison_name>/
+└── target_violation_windows/
+    ├── violation_comparison_config.json
+    ├── violation_comparison_results.json
+    ├── window_comparisons.csv
+    ├── README.md
+    └── sources/
+        └── <preprocessing-relative-source>/
+            ├── raw/
+            │   └── window_<index>_start_<time>s.png
+            ├── lowpass_3hz/
+            └── ...
+```
+
+`window_comparisons.csv` records the target window, violated axes, full-series
+shift, signed query interval, coverage status, and image path. Existing output
+requires explicit `force: true`; replacement affects only
+`target_violation_windows/`.
 
 ## Outputs
 
