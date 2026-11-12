@@ -7,8 +7,9 @@ reintegrates angular velocity. See [`GLOSSARY.md`](../../GLOSSARY.md) for the
 domain terms and [`docs/windowing.md`](../windowing.md) for the project-wide
 window discretization contract.
 
-Use `uv run imup extrema --help`, `uv run imup extrema select --help`, and
-`uv run imup extrema run --help` for the authoritative command reference.
+Use `uv run imup extrema --help`, `uv run imup extrema select --help`,
+`uv run imup extrema run --help`, and `uv run imup extrema compare --help` for
+the authoritative command reference.
 
 ## Select representative inputs
 
@@ -133,6 +134,69 @@ no zero-phase correction, and retains the real filter delay.
 A cutoff must be positive, unique, and lower than the file's Nyquist frequency.
 An invalid file/cutoff variant is recorded as a failure while other files and
 valid variants continue. An empty cutoff array requests raw-only analysis.
+
+The 11 Hz, fourth-order, causal Butterworth result is the **Target Integrated
+Angle**, the model's only prediction target. Raw integrated angle and all other
+cutoffs are diagnostic variants. See
+[`filter-delay-report.md`](filter-delay-report.md) for measured delay ranges and
+the estimated alignment contract.
+
+## Compare angle variants with the target
+
+`extrema compare` consumes the saved CSV variants from an existing analysis
+run. It does not refilter the data. A complete JSON request is:
+
+```json
+{
+  "comparison_name": "q50-target-angle",
+  "analysis_run_name": "q50-default-bounds",
+  "target_cutoff_hz": 11.0,
+  "comparison_cutoff_frequencies_hz": [3.0, 5.0, 7.0, 9.0],
+  "include_raw": true,
+  "force": false
+}
+```
+
+```bash
+uv run imup extrema compare --config <path>
+```
+
+The equivalent complete named-argument mode is:
+
+```bash
+uv run imup extrema compare \
+  --comparison-name q50-target-angle \
+  --analysis-run-name q50-default-bounds \
+  --target-cutoff-hz 11 \
+  --comparison-cutoff-frequencies-hz 3 5 7 9 \
+  --include-raw
+```
+
+Named arguments and `--config` are mutually exclusive. Each source gets five
+uncompensated and five estimated-delay-compensated plots. Every image has three
+vertically stacked x/y/z panels: the Target Integrated Angle is solid, the
+comparison is long-dashed, and a translucent band exposes small differences.
+The compensated image discards non-overlapping data at both ends. Its title
+does not disclose the estimated shift.
+
+Comparison output is atomically published under:
+
+```text
+outputs/angle_extrema/comparisons/<comparison_name>/
+├── comparison_config.json
+├── comparison_results.json
+├── delay_compensation.csv
+├── README.md
+└── sources/
+    └── <preprocessing-relative-source>/
+        ├── raw_vs_target_11hz_without_delay_compensation.png
+        ├── raw_vs_target_11hz_with_delay_compensation.png
+        └── ...
+```
+
+`delay_compensation.csv` records the shared tri-axis shift, direction,
+correlation, and retained time range for every source/variant pair. Existing
+output requires explicit `force: true`; replacement is run-wide.
 
 ## Outputs
 
