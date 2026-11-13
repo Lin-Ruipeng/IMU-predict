@@ -23,6 +23,14 @@ FloatArray = npt.NDArray[np.float64]
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _AXES = ("x", "y", "z")
+_ECDF_PERCENTILES = (0.5, 0.9, 0.95, 0.99)
+_COMPARATOR_COLORS = {
+    "raw": "#4D4D4D",
+    "lowpass_3hz": "#CC79A7",
+    "lowpass_5hz": "#E69F00",
+    "lowpass_7hz": "#009E73",
+    "lowpass_9hz": "#D55E00",
+}
 _ALLOWED_CONFIG_KEYS = frozenset(
     {
         "comparison_name",
@@ -30,6 +38,8 @@ _ALLOWED_CONFIG_KEYS = frozenset(
         "target_cutoff_hz",
         "comparison_cutoff_frequencies_hz",
         "include_raw",
+        "error_ecdf",
+        "error_ecdf_percentile_guides",
         "force",
     }
 )
@@ -44,6 +54,8 @@ class ComparisonConfig:
     target_cutoff_hz: float = 11.0
     comparison_cutoff_frequencies_hz: tuple[float, ...] = (3.0, 5.0, 7.0, 9.0)
     include_raw: bool = True
+    error_ecdf: bool = False
+    error_ecdf_percentile_guides: bool = False
     force: bool = False
 
 
@@ -74,6 +86,13 @@ class ComparisonRunResult:
 class _AngleData:
     rows: FloatArray
     sample_interval_s: float
+
+
+@dataclass(frozen=True)
+class _AbsoluteErrorSeries:
+    comparator: str
+    target_elapsed_s: FloatArray
+    errors_deg: FloatArray
 
 
 def load_comparison_config(
@@ -133,6 +152,14 @@ def load_comparison_config(
         include_raw=_boolean(
             values.get("include_raw", True), "include_raw", resolved_path
         ),
+        error_ecdf=_boolean(
+            values.get("error_ecdf", False), "error_ecdf", resolved_path
+        ),
+        error_ecdf_percentile_guides=_boolean(
+            values.get("error_ecdf_percentile_guides", False),
+            "error_ecdf_percentile_guides",
+            resolved_path,
+        ),
         force=_boolean(values.get("force", False), "force", resolved_path),
     )
 
@@ -169,6 +196,7 @@ def run_angle_comparison(
         tempfile.mkdtemp(prefix=f".{config.comparison_name}.", dir=output_dir.parent)
     )
     records: list[dict[str, object]] = []
+    absolute_error_summary: list[dict[str, object]] = []
     failures: list[ComparisonDiagnostic] = []
     warnings: list[ComparisonDiagnostic] = []
     processed_sources = 0
@@ -179,6 +207,7 @@ def run_angle_comparison(
         )
         for source in sources:
             source_records = 0
+            error_series: list[_AbsoluteErrorSeries] = []
             source_run_dir = _source_output_dir(source, source_run, root)
             source_output = _source_output_dir(source, temporary_dir, root)
             try:
@@ -221,6 +250,17 @@ def run_angle_comparison(
                             shift_s,
                         )
                     )
+                    if config.error_ecdf:
+                        error_series.append(
+                            _AbsoluteErrorSeries(
+                                comparator=variant,
+                                target_elapsed_s=aligned_time,
+                                errors_deg=_anchor_relative_absolute_errors(
+                                    aligned_target,
+                                    aligned_comparator,
+                                ),
+                            )
+                        )
                     y_limits = _axis_limits(target.rows[:, :3], comparator.rows[:, :3])
                     prefix = (
                         f"{variant}_vs_target_{_cutoff_slug(config.target_cutoff_hz)}hz"
@@ -265,6 +305,23 @@ def run_angle_comparison(
                         }
                     )
                     source_records += 1
+                if config.error_ecdf and error_series:
+                    _write_absolute_errors_csv(
+                        source_output / "absolute_errors.csv",
+                        error_series,
+                    )
+                    _plot_absolute_error_ecdf(
+                        source_output / "absolute_error_ecdf.png",
+                        error_series,
+                        percentile_guides=config.error_ecdf_percentile_guides,
+                    )
+                    absolute_error_summary.extend(
+                        _absolute_error_summary_records(
+                            source_file=_display_path(source, root),
+                            target=target_variant,
+                            series=error_series,
+                        )
+                    )
                 if source_records:
                     processed_sources += 1
             except (AngleExtremaError, OSError, ValueError) as error:
@@ -280,6 +337,11 @@ def run_angle_comparison(
                 )
 
         _write_compensation_csv(temporary_dir / "delay_compensation.csv", records)
+        if config.error_ecdf:
+            _write_absolute_error_summary_csv(
+                temporary_dir / "absolute_error_summary.csv",
+                absolute_error_summary,
+            )
         _write_readme(temporary_dir / "README.md", config)
         _write_json(
             temporary_dir / "comparison_results.json",
@@ -347,8 +409,12 @@ def _validate_config(config: ComparisonConfig) -> None:
         )
     if not config.include_raw and not cutoffs:
         raise AngleExtremaError("at least one comparison variant is required")
+    if config.error_ecdf_percentile_guides and not config.error_ecdf:
+        raise AngleExtremaError("error_ecdf_percentile_guides requires error_ecdf=true")
     for boolean_name, boolean_value in (
         ("include_raw", config.include_raw),
+        ("error_ecdf", config.error_ecdf),
+        ("error_ecdf_percentile_guides", config.error_ecdf_percentile_guides),
         ("force", config.force),
     ):
         if not isinstance(boolean_value, bool):
@@ -533,6 +599,24 @@ def _align_comparator(
     return common_time, target_rows[mask, :3], aligned
 
 
+def _anchor_relative_absolute_errors(
+    aligned_target: FloatArray,
+    aligned_comparator: FloatArray,
+) -> FloatArray:
+    """Return tri-axis absolute errors after independently anchoring both curves."""
+    target_relative = aligned_target - aligned_target[[0], :]
+    comparator_relative = aligned_comparator - aligned_comparator[[0], :]
+    return np.abs(target_relative - comparator_relative)
+
+
+def _empirical_quantiles(values: FloatArray) -> FloatArray:
+    """Return p50/p90/p95/p99 as inverse-ECDF observed values."""
+    return np.asarray(
+        np.quantile(values, _ECDF_PERCENTILES, method="inverted_cdf"),
+        dtype=np.float64,
+    )
+
+
 def _axis_limits(
     target: FloatArray, comparator: FloatArray
 ) -> list[tuple[float, float]]:
@@ -602,6 +686,70 @@ def _plot_comparison(
         plt.close(figure)
 
 
+def _plot_absolute_error_ecdf(
+    destination: Path,
+    series: list[_AbsoluteErrorSeries],
+    *,
+    percentile_guides: bool,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    sns.set_theme(style="whitegrid", context="notebook", palette="colorblind")
+    fallback_colors = sns.color_palette("colorblind", n_colors=len(series))
+    figure, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=False, sharey=True)
+    try:
+        for axis_index, axis_name in enumerate(_AXES):
+            axis = axes[axis_index]
+            for series_index, item in enumerate(series):
+                sorted_errors = np.sort(item.errors_deg[:, axis_index])
+                cumulative = np.arange(1, sorted_errors.size + 1) / sorted_errors.size
+                axis.step(
+                    np.concatenate(([sorted_errors[0]], sorted_errors)),
+                    np.concatenate(([0.0], cumulative)),
+                    where="post",
+                    color=_COMPARATOR_COLORS.get(
+                        item.comparator,
+                        fallback_colors[series_index],
+                    ),
+                    linewidth=1.8,
+                    label=_variant_label(item.comparator),
+                )
+            if percentile_guides:
+                for percentile in _ECDF_PERCENTILES:
+                    axis.axhline(
+                        percentile,
+                        color="#777777",
+                        linewidth=0.8,
+                        linestyle=(0, (3, 3)),
+                        alpha=0.65,
+                    )
+                    axis.text(
+                        0.995,
+                        percentile,
+                        f"p{percentile * 100:g}",
+                        transform=axis.get_yaxis_transform(),
+                        horizontalalignment="right",
+                        verticalalignment="bottom",
+                        color="#555555",
+                        fontsize="x-small",
+                    )
+            axis.set_ylim(0.0, 1.0)
+            axis.set_xlabel("Absolute angle error (deg)")
+            axis.set_ylabel("ECDF")
+            axis.set_title(f"{axis_name.upper()} axis", loc="left")
+            axis.legend(loc="lower right", fontsize="small")
+        figure.suptitle("Absolute Error ECDF — Delay Compensated and Anchor-relative")
+        figure.tight_layout()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(destination, dpi=180, format="png")
+    finally:
+        plt.close(figure)
+
+
 def _source_output_dir(source: Path, base: Path, root: Path) -> Path:
     preprocessing_root = (root / "outputs" / "preprocessing").resolve()
     if source.is_relative_to(preprocessing_root):
@@ -620,6 +768,8 @@ def _normalized_config(config: ComparisonConfig) -> dict[str, object]:
             config.comparison_cutoff_frequencies_hz
         ),
         "include_raw": config.include_raw,
+        "error_ecdf": config.error_ecdf,
+        "error_ecdf_percentile_guides": config.error_ecdf_percentile_guides,
         "force": config.force,
     }
 
@@ -645,7 +795,102 @@ def _write_compensation_csv(
         writer.writerows(records)
 
 
+def _write_absolute_errors_csv(
+    destination: Path,
+    series: list[_AbsoluteErrorSeries],
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(
+            (
+                "target_elapsed_s",
+                "comparator",
+                "x_error_deg",
+                "y_error_deg",
+                "z_error_deg",
+            )
+        )
+        for item in series:
+            for row_index, elapsed_s in enumerate(item.target_elapsed_s):
+                errors = item.errors_deg[row_index]
+                writer.writerow(
+                    (
+                        _clean_float(float(elapsed_s)),
+                        item.comparator,
+                        _clean_float(float(errors[0])),
+                        _clean_float(float(errors[1])),
+                        _clean_float(float(errors[2])),
+                    )
+                )
+
+
+def _absolute_error_summary_records(
+    *,
+    source_file: str,
+    target: str,
+    series: list[_AbsoluteErrorSeries],
+) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for item in series:
+        for axis_index, axis_name in enumerate(_AXES):
+            values = item.errors_deg[:, axis_index]
+            p50, p90, p95, p99 = _empirical_quantiles(values)
+            records.append(
+                {
+                    "source_file": source_file,
+                    "target": target,
+                    "comparator": item.comparator,
+                    "axis": axis_name,
+                    "sample_count": values.size,
+                    "p50_absolute_error_deg": _clean_float(float(p50)),
+                    "p90_absolute_error_deg": _clean_float(float(p90)),
+                    "p95_absolute_error_deg": _clean_float(float(p95)),
+                    "p99_absolute_error_deg": _clean_float(float(p99)),
+                    "max_absolute_error_deg": _clean_float(float(np.max(values))),
+                }
+            )
+    return records
+
+
+def _write_absolute_error_summary_csv(
+    destination: Path,
+    records: list[dict[str, object]],
+) -> None:
+    fields = (
+        "source_file",
+        "target",
+        "comparator",
+        "axis",
+        "sample_count",
+        "p50_absolute_error_deg",
+        "p90_absolute_error_deg",
+        "p95_absolute_error_deg",
+        "p99_absolute_error_deg",
+        "max_absolute_error_deg",
+    )
+    with destination.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(records)
+
+
 def _write_readme(destination: Path, config: ComparisonConfig) -> None:
+    error_ecdf = ""
+    if config.error_ecdf:
+        guides = (
+            " Horizontal p50/p90/p95/p99 guides are included."
+            if config.error_ecdf_percentile_guides
+            else ""
+        )
+        error_ecdf = (
+            "\n\n`absolute_error_ecdf.png` plots one tri-axis ECDF per source "
+            "after both aligned curves independently subtract their first "
+            "overlapping sample. `absolute_errors.csv` preserves every pointwise "
+            "absolute error, and `absolute_error_summary.csv` reports observed "
+            "inverse-ECDF p50/p90/p95/p99 and maximum errors."
+            f"{guides}"
+        )
     destination.write_text(
         "# Target integrated angle comparisons\n\n"
         f"Target: {config.target_cutoff_hz:g} Hz fourth-order causal Butterworth "
@@ -656,7 +901,7 @@ def _write_readme(destination: Path, config: ComparisonConfig) -> None:
         "standardized first differences. Compensated plots use linear "
         "sub-sample interpolation and omit both non-overlapping edges. This is "
         "an effective alignment for visual comparison, not an exact fixed filter "
-        "delay.\n",
+        f"delay.{error_ecdf}\n",
         encoding="utf-8",
     )
 

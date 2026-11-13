@@ -198,6 +198,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="compare raw integrated angle with the target (default: true)",
     )
     compare_parser.add_argument(
+        "--error-ecdf",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="write anchor-relative absolute-error ECDF plots and CSVs",
+    )
+    compare_parser.add_argument(
+        "--error-ecdf-percentile-guides",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="show p50/p90/p95/p99 horizontal guides on error ECDF plots",
+    )
+    compare_parser.add_argument(
         "--force",
         action="store_true",
         default=None,
@@ -429,6 +441,8 @@ def _run_extrema_comparison(
         "target_cutoff_hz",
         "comparison_cutoff_frequencies_hz",
         "include_raw",
+        "error_ecdf",
+        "error_ecdf_percentile_guides",
         "force",
     )
     if config_path is not None:
@@ -452,6 +466,12 @@ def _run_extrema_comparison(
                 else tuple(args.comparison_cutoff_frequencies_hz)
             ),
             include_raw=True if args.include_raw is None else bool(args.include_raw),
+            error_ecdf=(False if args.error_ecdf is None else bool(args.error_ecdf)),
+            error_ecdf_percentile_guides=(
+                False
+                if args.error_ecdf_percentile_guides is None
+                else bool(args.error_ecdf_percentile_guides)
+            ),
             force=False if args.force is None else bool(args.force),
         )
     result = run_angle_comparison(config, repository_root=repository_root)
