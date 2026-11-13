@@ -154,6 +154,8 @@ run. It does not refilter the data. A complete JSON request is:
   "target_cutoff_hz": 11.0,
   "comparison_cutoff_frequencies_hz": [3.0, 5.0, 7.0, 9.0],
   "include_raw": true,
+  "error_ecdf": false,
+  "error_ecdf_percentile_guides": false,
   "force": false
 }
 ```
@@ -180,6 +182,75 @@ comparison is long-dashed, and a translucent band exposes small differences.
 The compensated image discards non-overlapping data at both ends. Its title
 does not disclose the estimated shift.
 
+### Anchor-relative absolute-error ECDF
+
+Pass `--error-ecdf`, or set `"error_ecdf": true`, to generate one absolute-error
+ECDF image and one pointwise-error CSV for every successfully compared source.
+The implementation iterates over all sources in the analysis run; it does not
+assume a fixed source count. Add `--error-ecdf-percentile-guides`, or set
+`"error_ecdf_percentile_guides": true`, to draw horizontal p50, p90, p95, and
+p99 probability guides. The guide option requires error ECDF output to be
+enabled. For example:
+
+```bash
+uv run imup extrema compare \
+  --comparison-name q50-target-angle-error-ecdf \
+  --analysis-run-name q50-default-bounds \
+  --target-cutoff-hz 11 \
+  --comparison-cutoff-frequencies-hz 3 5 7 9 \
+  --include-raw \
+  --error-ecdf \
+  --error-ecdf-percentile-guides
+```
+
+The 11 Hz value is the Target Integrated Angle's low-pass cutoff, not a sample
+rate. Let its unchanged time grid be `t_i`, let the signed estimated comparator
+shift be `s`, and let the comparator samples be `C_a(u_j)` for axis
+`a in {x, y, z}`. Retain the strict intersection
+
+```text
+I = {i | u_0 <= t_i - s <= u_m}
+```
+
+and query the comparator at `q_i = t_i - s`. If `q_i` equals a comparator
+sample time, use that sample directly. Otherwise choose adjacent times with
+`u_j < q_i < u_(j+1)` and compute
+
+```text
+alpha_i = (q_i - u_j) / (u_(j+1) - u_j)
+C_tilde_a(t_i) = (1 - alpha_i) C_a(u_j) + alpha_i C_a(u_(j+1))
+```
+
+This linear interpolation produces exactly one comparator value for every
+retained target time; it does not add target time points, extrapolate, or wrap
+either edge. Let `i_0 = min(I)` be the first retained target point. Independently
+form the two anchor-relative angles
+
+```text
+T_prime_a(t_i) = T_a(t_i) - T_a(t_(i_0))
+C_prime_a(t_i) = C_tilde_a(t_i) - C_tilde_a(t_(i_0))
+```
+
+and their pointwise absolute error
+
+```text
+e_(a,i) = abs(T_prime_a(t_i) - C_prime_a(t_i)).
+```
+
+For the `n` retained errors of one source, comparator, and axis, the plotted
+empirical cumulative distribution is
+
+```text
+F_a(e) = count(e_(a,i) <= e) / n.
+```
+
+Its reported quantile is the observed inverse-ECDF value
+`Q_a(p) = inf {e | F_a(e) >= p}`: after sorting, take observation `ceil(n p)`.
+No additional interpolation between error values is applied. Each image has
+independently scaled x/y/z panels; every panel overlays raw and the configured
+cutoff variants as step curves on one absolute-error axis, with ECDF fixed to
+`[0, 1]`.
+
 Comparison output is atomically published under:
 
 ```text
@@ -187,9 +258,12 @@ outputs/angle_extrema/comparisons/<comparison_name>/
 ├── comparison_config.json
 ├── comparison_results.json
 ├── delay_compensation.csv
+├── absolute_error_summary.csv       # only with error_ecdf
 ├── README.md
 └── sources/
     └── <preprocessing-relative-source>/
+        ├── absolute_error_ecdf.png   # only with error_ecdf
+        ├── absolute_errors.csv       # only with error_ecdf
         ├── raw_vs_target_11hz_without_delay_compensation.png
         ├── raw_vs_target_11hz_with_delay_compensation.png
         └── ...
@@ -198,6 +272,11 @@ outputs/angle_extrema/comparisons/<comparison_name>/
 `delay_compensation.csv` records the shared tri-axis shift, direction,
 correlation, and retained time range for every source/variant pair. Existing
 output requires explicit `force: true`; replacement is run-wide.
+`absolute_errors.csv` records `target_elapsed_s`, the comparator machine name,
+and x/y/z absolute errors for every retained point. Because each comparator can
+have a different strict intersection, its rows remain a separate long-table
+group. `absolute_error_summary.csv` contains one row per source, comparator,
+and axis with the retained sample count, p50, p90, p95, p99, and maximum error.
 
 ## Compare Target Violation Windows
 
