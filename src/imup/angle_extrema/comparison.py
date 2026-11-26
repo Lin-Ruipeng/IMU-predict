@@ -742,11 +742,11 @@ def _plot_absolute_error_ecdf(
                         alpha=0.65,
                     )
                     axis.text(
-                        0.995,
+                        1.005,
                         percentile,
                         f"p{percentile * 100:g}",
                         transform=axis.get_yaxis_transform(),
-                        horizontalalignment="right",
+                        horizontalalignment="left",
                         verticalalignment="bottom",
                         color="#555555",
                         fontsize="x-small",
@@ -758,7 +758,7 @@ def _plot_absolute_error_ecdf(
             axis.legend(loc="lower right", fontsize="small")
         figure.suptitle(
             "Absolute Error ECDF — Delay Compensated and Anchor-relative\n"
-            f"Reference: {target_label}"
+            f"{target_label}"
         )
         figure.tight_layout()
         destination.parent.mkdir(parents=True, exist_ok=True)
