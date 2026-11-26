@@ -18,6 +18,8 @@ import numpy as np
 import numpy.typing as npt
 
 from imup.angle_extrema.comparison import (
+    _COMPARATOR_COLORS,
+    _analysis_sources,
     _cutoff_slug,
     _display_path,
     _read_angle_data,
@@ -26,7 +28,16 @@ from imup.angle_extrema.comparison import (
     _variant_label,
     load_comparison_config,
 )
-from imup.angle_extrema.core import AngleExtremaError
+from imup.angle_extrema.core import (
+    AngleExtremaError,
+    read_json_object,
+    window_row_bounds,
+)
+from imup.angle_extrema.filtering import (
+    DEFAULT_FILTER_FAMILY,
+    comparison_reference_label,
+    read_filter_family,
+)
 from imup.preprocessing import find_repository_root
 
 FloatArray = npt.NDArray[np.float64]
@@ -35,13 +46,6 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _AXES = ("x", "y", "z")
 _ALLOWED_CONFIG_KEYS = frozenset({"comparison_name", "analysis_run_name", "force"})
 _TARGET_COLOR = "#0072B2"
-_COMPARATOR_COLORS = {
-    "raw": "#4D4D4D",
-    "lowpass_3hz": "#CC79A7",
-    "lowpass_5hz": "#E69F00",
-    "lowpass_7hz": "#009E73",
-    "lowpass_9hz": "#D55E00",
-}
 
 
 @dataclass(frozen=True)
@@ -78,13 +82,14 @@ class ViolationComparisonRunResult:
 
 
 @dataclass(frozen=True)
-class _TargetViolation:
+class _TargetWindow:
     source_file: str
     window_index: int
     start_row: int
     start_elapsed_s: float
     end_elapsed_s_exclusive: float
     violated_axes: tuple[str, ...]
+    end_row: int | None = None
 
 
 @dataclass(frozen=True)
@@ -120,12 +125,14 @@ class _RenderJob:
     source: Path
     target_rows: FloatArray
     comparator_rows: FloatArray
-    violations: tuple[_TargetViolation, ...]
+    windows: tuple[_TargetWindow, ...]
     comparator_variant: str
     target_variant: str
     shift: _Shift
     lower_bound_deg: float
     upper_bound_deg: float
+    target_label: str
+    window_label: str
 
 
 @dataclass(frozen=True)
@@ -144,7 +151,7 @@ def load_violation_comparison_config(
     """Load and strictly validate one violation-comparison JSON object."""
     root = (repository_root or find_repository_root()).resolve()
     resolved_path = _resolve_path(config_path, root)
-    values = _read_json_object(resolved_path, "violation comparison JSON")
+    values = read_json_object(resolved_path, "window comparison JSON")
     unknown = set(values) - _ALLOWED_CONFIG_KEYS
     if unknown:
         raise AngleExtremaError(
@@ -179,6 +186,28 @@ def run_violation_comparison(
     repository_root: Path | None = None,
 ) -> ViolationComparisonRunResult:
     """Render pairwise comparisons for every Target Violation Window."""
+    return _run_window_comparison(
+        config, repository_root=repository_root, all_windows=False
+    )
+
+
+def run_window_comparison(
+    config: ViolationComparisonConfig,
+    *,
+    repository_root: Path | None = None,
+) -> ViolationComparisonRunResult:
+    """Render pairwise comparisons for every complete analysis window."""
+    return _run_window_comparison(
+        config, repository_root=repository_root, all_windows=True
+    )
+
+
+def _run_window_comparison(
+    config: ViolationComparisonConfig,
+    *,
+    repository_root: Path | None,
+    all_windows: bool,
+) -> ViolationComparisonRunResult:
     root = (repository_root or find_repository_root()).resolve()
     _validate_config(config)
     comparison_dir = (
@@ -187,7 +216,11 @@ def run_violation_comparison(
     analysis_run = (
         root / "outputs" / "angle_extrema" / "runs" / config.analysis_run_name
     )
-    output_dir = comparison_dir / "target_violation_windows"
+    output_dir = comparison_dir / (
+        "all_windows" if all_windows else "target_violation_windows"
+    )
+    output_prefix = "window_comparison" if all_windows else "violation_comparison"
+    window_label = "Analysis Window" if all_windows else "Target Violation Window"
     if not comparison_dir.is_dir():
         raise AngleExtremaError(
             "comparison directory does not exist", path=comparison_dir
@@ -198,7 +231,7 @@ def run_violation_comparison(
         )
     if output_dir.exists() and not config.force:
         raise AngleExtremaError(
-            "target violation comparison output already exists; rerun with "
+            "window comparison output already exists; rerun with "
             "force=true to replace it",
             path=output_dir,
         )
@@ -216,7 +249,7 @@ def run_violation_comparison(
             "saved comparison uses a different analysis run",
             path=comparison_dir / "comparison_config.json",
         )
-    if comparison_config.target_cutoff_hz != 11.0:
+    if not all_windows and comparison_config.target_cutoff_hz != 11.0:
         raise AngleExtremaError(
             "target violation comparisons require the 11 Hz Target Integrated Angle",
             path=comparison_dir / "comparison_config.json",
@@ -231,7 +264,14 @@ def run_violation_comparison(
         ],
     ]
     analysis_config_path = analysis_run / "analysis_config.json"
-    analysis_config = _read_json_object(analysis_config_path, "analysis configuration")
+    analysis_config = read_json_object(analysis_config_path, "analysis configuration")
+    filter_family = read_filter_family(
+        analysis_config.get("filter_family", DEFAULT_FILTER_FAMILY),
+        path=analysis_config_path,
+    )
+    target_label = comparison_reference_label(
+        filter_family, comparison_config.target_cutoff_hz
+    )
     lower_bound = _number(analysis_config, "lower_bound_deg", analysis_config_path)
     upper_bound = _number(analysis_config, "upper_bound_deg", analysis_config_path)
     if lower_bound >= upper_bound:
@@ -244,12 +284,29 @@ def run_violation_comparison(
     )
     shifts = _read_shifts(comparison_dir / "delay_compensation.csv", target_variant)
     shift_by_pair = {(shift.source_file, shift.comparator): shift for shift in shifts}
-    violations_by_source: dict[str, list[_TargetViolation]] = defaultdict(list)
+    violations_by_source: dict[str, list[_TargetWindow]] = defaultdict(list)
     for violation in violations:
         violations_by_source[violation.source_file].append(violation)
+    target_windows = len(violations)
+    if all_windows:
+        window_duration = _number(
+            analysis_config, "window_duration_s", analysis_config_path
+        )
+        stride_duration = _number(
+            analysis_config, "stride_duration_s", analysis_config_path
+        )
+        if window_duration <= 0 or stride_duration <= 0:
+            raise AngleExtremaError(
+                "window and stride durations must be greater than zero",
+                path=analysis_config_path,
+            )
+        sources = _analysis_sources(analysis_config_path, analysis_config, root)
+        for source in sources:
+            violations_by_source.setdefault(_display_path(source, root), [])
+        target_windows = 0
 
     temporary_dir = Path(
-        tempfile.mkdtemp(prefix=".target_violation_windows.", dir=comparison_dir)
+        tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=comparison_dir)
     )
     records: list[dict[str, object]] = []
     failures: list[ViolationComparisonDiagnostic] = []
@@ -257,7 +314,7 @@ def run_violation_comparison(
     processed_source_files: set[str] = set()
     try:
         _write_json(
-            temporary_dir / "violation_comparison_config.json",
+            temporary_dir / f"{output_prefix}_config.json",
             {
                 "comparison_name": config.comparison_name,
                 "analysis_run_name": config.analysis_run_name,
@@ -265,7 +322,7 @@ def run_violation_comparison(
             },
         )
         jobs: list[_RenderJob] = []
-        for source_file, source_violations in violations_by_source.items():
+        for source_file, source_windows in violations_by_source.items():
             source = _resolve_path(Path(source_file), root)
             try:
                 raw = _read_angle_data(source)
@@ -281,6 +338,41 @@ def run_violation_comparison(
                     )
                 )
                 continue
+
+            if all_windows:
+                violated_axes = {
+                    window.start_row: window.violated_axes for window in source_windows
+                }
+                source_windows = [
+                    _TargetWindow(
+                        source_file=source_file,
+                        window_index=index,
+                        start_row=start,
+                        end_row=end,
+                        start_elapsed_s=float(target.rows[start, 3]),
+                        end_elapsed_s_exclusive=(
+                            float(target.rows[start, 3])
+                            + (end - start) * target.sample_interval_s
+                        ),
+                        violated_axes=violated_axes.get(start, ()),
+                    )
+                    for index, (start, end) in enumerate(
+                        window_row_bounds(
+                            len(target.rows),
+                            target.sample_interval_s,
+                            window_duration,
+                            stride_duration,
+                        )
+                    )
+                ]
+                target_windows += len(source_windows)
+                if not source_windows:
+                    warnings.append(
+                        ViolationComparisonDiagnostic(
+                            source, "input is shorter than one complete window"
+                        )
+                    )
+                    continue
 
             for comparator_variant in expected_comparators:
                 shift = shift_by_pair.get((source_file, comparator_variant))
@@ -319,12 +411,14 @@ def run_violation_comparison(
                         source=source,
                         target_rows=target.rows,
                         comparator_rows=comparator.rows,
-                        violations=tuple(source_violations),
+                        windows=tuple(source_windows),
                         comparator_variant=comparator_variant,
                         target_variant=target_variant,
                         shift=shift,
                         lower_bound_deg=lower_bound,
                         upper_bound_deg=upper_bound,
+                        target_label=target_label,
+                        window_label=window_label,
                     )
                 )
 
@@ -348,7 +442,9 @@ def run_violation_comparison(
         _write_window_csv(temporary_dir / "window_comparisons.csv", records)
         _write_readme(
             temporary_dir / "README.md",
-            target_variant=target_variant,
+            target_label=target_label,
+            window_label=window_label,
+            all_windows=all_windows,
             lower_bound_deg=lower_bound,
             upper_bound_deg=upper_bound,
         )
@@ -356,11 +452,13 @@ def run_violation_comparison(
             record["coverage_status"] == "partial" for record in records
         )
         _write_json(
-            temporary_dir / "violation_comparison_results.json",
+            temporary_dir / f"{output_prefix}_results.json",
             {
                 "status": "failed" if failures else "succeeded",
                 "processed_sources": processed_sources,
-                "target_violation_windows": len(violations),
+                ("target_windows" if all_windows else "target_violation_windows"): (
+                    target_windows
+                ),
                 "plots": len(records),
                 "partial_coverages": partial_count,
                 "failures": [_diagnostic_payload(item, root) for item in failures],
@@ -375,7 +473,7 @@ def run_violation_comparison(
     return ViolationComparisonRunResult(
         output_dir=output_dir,
         processed_sources=processed_sources,
-        target_windows=len(violations),
+        target_windows=target_windows,
         plots=len(records),
         failures=tuple(failures),
         warnings=tuple(warnings),
@@ -390,10 +488,10 @@ def _render_job(job: _RenderJob) -> _RenderResult:
         _source_output_dir(job.source, job.temporary_dir, job.root)
         / job.comparator_variant
     )
-    for violation in job.violations:
+    for window in job.windows:
         filename = (
-            f"window_{violation.window_index:06d}_start_"
-            f"{_time_slug(violation.start_elapsed_s)}s.png"
+            f"window_{window.window_index:06d}_start_"
+            f"{_time_slug(window.start_elapsed_s)}s.png"
         )
         plot_path = comparator_output / filename
         final_plot_path = job.output_dir / plot_path.relative_to(job.temporary_dir)
@@ -401,20 +499,23 @@ def _render_job(job: _RenderJob) -> _RenderResult:
             prepared = _prepare_window(
                 job.target_rows,
                 job.comparator_rows,
-                start_row=violation.start_row,
-                end_elapsed_s_exclusive=violation.end_elapsed_s_exclusive,
+                start_row=window.start_row,
+                end_elapsed_s_exclusive=window.end_elapsed_s_exclusive,
                 shift_s=job.shift.shift_s,
+                end_row=window.end_row,
             )
             _plot_window_comparison(
                 plot_path,
                 prepared,
                 comparator_variant=job.comparator_variant,
-                violated_axes=violation.violated_axes,
+                violated_axes=window.violated_axes,
                 lower_bound_deg=job.lower_bound_deg,
                 upper_bound_deg=job.upper_bound_deg,
                 window_duration_s=(
-                    violation.end_elapsed_s_exclusive - violation.start_elapsed_s
+                    window.end_elapsed_s_exclusive - window.start_elapsed_s
                 ),
+                target_label=job.target_label,
+                window_label=job.window_label,
             )
         except (AngleExtremaError, OSError, ValueError) as error:
             failures.append(
@@ -439,7 +540,7 @@ def _render_job(job: _RenderJob) -> _RenderResult:
             _window_record(
                 root=job.root,
                 output_path=final_plot_path,
-                violation=violation,
+                violation=window,
                 comparator_variant=job.comparator_variant,
                 target_variant=job.target_variant,
                 shift=job.shift,
@@ -447,7 +548,7 @@ def _render_job(job: _RenderJob) -> _RenderResult:
             )
         )
     return _RenderResult(
-        source_file=job.violations[0].source_file,
+        source_file=job.windows[0].source_file,
         records=tuple(records),
         failures=tuple(failures),
         warnings=tuple(warnings),
@@ -461,15 +562,19 @@ def _prepare_window(
     start_row: int,
     end_elapsed_s_exclusive: float,
     shift_s: float,
+    end_row: int | None = None,
 ) -> _PreparedWindow:
     """Extract, align and independently rebase one target/comparator window."""
     if start_row < 0 or start_row >= target_rows.shape[0]:
         raise AngleExtremaError("target violation start_row is outside the signal")
     start_elapsed_s = float(target_rows[start_row, 3])
-    end_row = int(
-        np.searchsorted(target_rows[:, 3], end_elapsed_s_exclusive, side="left")
-    )
-    if end_row - start_row < 2:
+    minimum_rows = 1
+    if end_row is None:
+        minimum_rows = 2
+        end_row = int(
+            np.searchsorted(target_rows[:, 3], end_elapsed_s_exclusive, side="left")
+        )
+    if end_row - start_row < minimum_rows:
         raise AngleExtremaError("target violation window has fewer than two rows")
     target_window = target_rows[start_row:end_row]
     target_time = target_window[:, 3] - start_elapsed_s
@@ -478,9 +583,10 @@ def _prepare_window(
     valid = (query_time >= comparator_rows[0, 3]) & (
         query_time <= comparator_rows[-1, 3]
     )
-    if np.count_nonzero(valid) < 2:
+    if np.count_nonzero(valid) < minimum_rows:
         raise AngleExtremaError(
-            "delay compensation leaves fewer than two comparator rows in the window"
+            f"delay compensation leaves fewer than {minimum_rows} "
+            "comparator rows in the window"
         )
     valid_query = query_time[valid]
     comparator_angles = np.column_stack(
@@ -517,6 +623,8 @@ def _plot_window_comparison(
     lower_bound_deg: float,
     upper_bound_deg: float,
     window_duration_s: float,
+    target_label: str,
+    window_label: str,
 ) -> None:
     import matplotlib
 
@@ -540,7 +648,8 @@ def _plot_window_comparison(
                 color=_TARGET_COLOR,
                 linewidth=2.2,
                 linestyle="-",
-                label="Target Integrated Angle (11 Hz)",
+                label=target_label,
+                marker="o" if target_values.size == 1 else None,
             )
             axes[index].plot(
                 prepared.comparator_time_s,
@@ -549,6 +658,7 @@ def _plot_window_comparison(
                 linewidth=1.7,
                 linestyle="-",
                 label=_variant_label(comparator_variant),
+                marker="o" if comparator_values.size == 1 else None,
             )
             axes[index].fill_between(
                 prepared.comparator_time_s,
@@ -590,7 +700,7 @@ def _plot_window_comparison(
             axes[index].grid(True, color="#D9D9D9", linewidth=0.7, alpha=0.8)
             axes[index].legend(loc="best", fontsize="small")
         axes[-1].set_xlabel("Time within target window (s)")
-        figure.suptitle("Target Violation Window — With Estimated Delay Compensation")
+        figure.suptitle(f"{window_label} — With Estimated Delay Compensation")
         figure.tight_layout()
         destination.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(destination, dpi=150, format="png")
@@ -601,15 +711,15 @@ def _plot_window_comparison(
 def _read_target_violations(
     results_path: Path,
     target_variant: str,
-) -> list[_TargetViolation]:
-    payload = _read_json_object(results_path, "angle-extrema results")
+) -> list[_TargetWindow]:
+    payload = read_json_object(results_path, "angle-extrema results")
     raw_violations = payload.get("violations")
     if not isinstance(raw_violations, list):
         raise AngleExtremaError(
             "angle-extrema results must contain a violations array",
             path=results_path,
         )
-    violations: list[_TargetViolation] = []
+    violations: list[_TargetWindow] = []
     for raw_record in raw_violations:
         if not isinstance(raw_record, dict):
             raise AngleExtremaError(
@@ -652,7 +762,7 @@ def _read_target_violations(
                 "target violation contains an unknown axis", path=results_path
             )
         violations.append(
-            _TargetViolation(
+            _TargetWindow(
                 source_file=source_file,
                 window_index=window_index,
                 start_row=start_row,
@@ -731,7 +841,7 @@ def _window_record(
     *,
     root: Path,
     output_path: Path,
-    violation: _TargetViolation,
+    violation: _TargetWindow,
     comparator_variant: str,
     target_variant: str,
     shift: _Shift,
@@ -796,15 +906,23 @@ def _write_window_csv(
 def _write_readme(
     destination: Path,
     *,
-    target_variant: str,
+    target_label: str,
+    window_label: str,
+    all_windows: bool,
     lower_bound_deg: float,
     upper_bound_deg: float,
 ) -> None:
+    bounds = f"`{lower_bound_deg:g}°` and `{upper_bound_deg:g}°`"
+    selection = (
+        f"Every complete analysis window is included. Strict bounds {bounds} "
+        "are used to mark any violating axes."
+        if all_windows
+        else f"Only windows where the target crosses strict bounds {bounds} are included."
+    )
     destination.write_text(
-        "# Target Violation Window comparisons\n\n"
-        f"Windows are selected only from `{target_variant}` and use strict "
-        f"bounds `{lower_bound_deg:g}°` and `{upper_bound_deg:g}°`. Each "
-        "plot compares the independently window-rebased target with one "
+        f"# {window_label} comparisons\n\n"
+        f"Reference: {target_label}. {selection} Each plot compares the "
+        "independently window-rebased target with one "
         "delay-compensated diagnostic variant. Both curves are solid and start "
         "at zero whenever the comparator covers the complete target window.\n\n"
         "`window_comparisons.csv` records the shared full-series tri-axis shift, "
@@ -827,20 +945,6 @@ def _validate_config(config: ViolationComparisonConfig) -> None:
             )
     if not isinstance(config.force, bool):
         raise AngleExtremaError("force must be a boolean")
-
-
-def _read_json_object(path: Path, description: str) -> dict[str, object]:
-    try:
-        payload: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise AngleExtremaError(
-            f"could not read {description}: {error}", path=path
-        ) from error
-    if not isinstance(payload, dict) or not all(
-        isinstance(key, str) for key in payload
-    ):
-        raise AngleExtremaError(f"{description} must contain one object", path=path)
-    return cast(dict[str, object], payload)
 
 
 def _number(values: Mapping[str, object], name: str, path: Path) -> float:

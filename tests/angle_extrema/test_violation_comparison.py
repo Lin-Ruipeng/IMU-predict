@@ -247,3 +247,68 @@ def test_compare_violations_accepts_a_complete_json_configuration(
         "analysis_run_name": "source-run",
         "force": False,
     }
+
+
+@pytest.mark.parametrize("use_json", [False, True])
+def test_compare_windows_includes_in_bounds_windows_and_discards_the_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_json: bool
+) -> None:
+    repository = _repository(tmp_path)
+    _write_fixture(repository)
+    analysis = repository / "outputs/angle_extrema/runs/source-run"
+    analysis_config_path = analysis / "analysis_config.json"
+    config = json.loads(analysis_config_path.read_text())
+    config.update(
+        window_duration_s=0.91, stride_duration_s=0.91, filter_family="elliptic"
+    )
+    analysis_config_path.write_text(json.dumps(config))
+    target_path = (
+        analysis
+        / "sources/person/session/sampleintegrated_angle/filtered/lowpass_11hz.csv"
+    )
+    target = np.loadtxt(target_path, delimiter=",")
+    target[10:, :3] = target[9, :3]
+    _write_rows(target_path, target)
+    comparison = repository / "outputs/angle_extrema/comparisons/known-lag"
+    delay_csv = (comparison / "delay_compensation.csv").read_bytes()
+    old_windows = comparison / "target_violation_windows"
+    old_windows.mkdir()
+    (old_windows / "README.md").write_text("Existing violation output")
+    request = {
+        "analysis_run_name": "source-run",
+        "comparison_name": "known-lag",
+        "force": False,
+    }
+    if use_json:
+        config_path = repository / "outputs/window-request.json"
+        config_path.write_text(json.dumps(request))
+        arguments = ["--config", "outputs/window-request.json"]
+    else:
+        arguments = [
+            "--analysis-run-name",
+            "source-run",
+            "--comparison-name",
+            "known-lag",
+        ]
+    monkeypatch.chdir(repository)
+
+    assert main(["extrema", "compare-windows", *arguments]) == 0
+
+    output = comparison / "all_windows"
+    with (output / "window_comparisons.csv").open(newline="") as index:
+        records = list(csv.DictReader(index))
+    assert [record["target_window_index"] for record in records] == ["0", "1"]
+    assert [record["violated_axes"] for record in records] == ["x", ""]
+    assert [float(record["target_end_elapsed_s_exclusive"]) for record in records] == (
+        pytest.approx([1.0, 2.0])
+    )
+    assert [record["coverage_status"] for record in records] == ["partial", "full"]
+    for record in records:
+        assert (repository / record["plot_path"]).read_bytes().startswith(b"\x89PNG")
+    assert json.loads((output / "window_comparison_config.json").read_text()) == request
+    result = json.loads((output / "window_comparison_results.json").read_text())
+    assert result["target_windows"] == result["plots"] == 2
+    assert result["partial_coverages"] == 1
+    assert "Elliptic reference (11 Hz)" in (output / "README.md").read_text()
+    assert (old_windows / "README.md").read_text() == "Existing violation output"
+    assert (comparison / "delay_compensation.csv").read_bytes() == delay_csv

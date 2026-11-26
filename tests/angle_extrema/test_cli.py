@@ -4,7 +4,9 @@ import csv
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
+from scipy import signal
 
 from imup import main
 
@@ -210,6 +212,7 @@ def test_run_uses_fixed_physical_windows_and_records_extrema(
         "outputs/preprocessing/person/session/sampleintegrated_angle.csv"
     ]
     assert saved_config["cutoff_frequencies_hz"] == []
+    assert saved_config["filter_family"] == "butterworth"
     assert raw_plot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert violation_timeline.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert "SUMMARY: processed=1 failed=0" in capsys.readouterr().err
@@ -283,6 +286,100 @@ def test_run_saves_a_causal_lowpass_variant_with_steady_initial_state(
     assert [row[3] for row in filtered] == pytest.approx(
         [index * 0.01 for index in range(201)]
     )
+
+
+def test_run_filters_angular_velocity_before_integrating_in_elliptic_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _make_repository(tmp_path)
+    source = repository / "outputs/preprocessing/sampleintegrated_angle.csv"
+    sample_rate = 128
+    elapsed = np.arange(sample_rate + 1) / sample_rate
+    velocity = np.column_stack(
+        [
+            np.where(elapsed[:-1] < 0.5, 2.0, -1.0),
+            np.full(sample_rate, 3.0),
+            2.0 + np.sin(2 * np.pi * 12 * elapsed[:-1]),
+        ]
+    )
+    initial_angles = np.array([1.0, -2.0, 3.0])
+    angles = initial_angles + np.vstack(
+        [np.zeros(3), np.cumsum(velocity, axis=0) / sample_rate]
+    )
+    np.savetxt(source, np.column_stack([angles, elapsed]), delimiter=",")
+    monkeypatch.chdir(repository)
+
+    assert (
+        main(
+            [
+                "extrema",
+                "run",
+                "--run-name",
+                "elliptic",
+                "--input-paths",
+                str(source),
+                "--filter-family",
+                "elliptic",
+                "--cutoff-frequencies-hz",
+                "4",
+                "6",
+            ]
+        )
+        == 0
+    )
+    run = repository / "outputs/angle_extrema/runs/elliptic"
+    config = json.loads((run / "analysis_config.json").read_text())
+    spec = json.loads((run / "extrema_results.json").read_text())["filter"]
+    assert config["filter_family"] == "elliptic"
+    assert spec["filtered_signal"] == "angular_velocity"
+    assert spec["order"] == 7
+    assert spec["passband_ripple_db"] == 0.1
+    assert spec["stopband_attenuation_db"] == 60
+    assert spec["stopband_edges_hz"] == pytest.approx([60 / 11, 90 / 11])
+    for cutoff in (4, 6):
+        sos = signal.ellip(7, 0.1, 60, cutoff, fs=sample_rate, output="sos")
+        initial_state = signal.sosfilt_zi(sos)[:, :, None] * velocity[0]
+        filtered_velocity, _ = signal.sosfilt(sos, velocity, axis=0, zi=initial_state)
+        expected = initial_angles + np.vstack(
+            [np.zeros(3), np.cumsum(filtered_velocity, axis=0) / sample_rate]
+        )
+        filtered = np.loadtxt(
+            run / f"sources/sampleintegrated_angle/filtered/lowpass_{cutoff}hz.csv",
+            delimiter=",",
+        )
+        np.testing.assert_allclose(filtered[:, :3], expected, atol=1e-12)
+        np.testing.assert_allclose(filtered[:65, :2], angles[:65, :2], atol=1e-12)
+        np.testing.assert_array_equal(filtered[:, 3], elapsed)
+
+
+def test_run_reports_elliptic_stopband_at_or_above_nyquist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = _make_repository(tmp_path)
+    source = repository / "outputs/preprocessing/sampleintegrated_angle.csv"
+    _write_angle_file(source, 40, dt=0.0625)
+    config = repository / "outputs/elliptic-request.json"
+    config.write_text(
+        json.dumps(
+            {
+                "run_name": "elliptic",
+                "input_paths": [str(source)],
+                "filter_family": "elliptic",
+                "cutoff_frequencies_hz": [6, 4],
+            }
+        )
+    )
+    monkeypatch.chdir(repository)
+
+    assert main(["extrema", "run", "--config", "outputs/elliptic-request.json"]) == 1
+    run = repository / "outputs/angle_extrema/runs/elliptic"
+    assert (run / "sources/sampleintegrated_angle/filtered/lowpass_4hz.csv").is_file()
+    results = json.loads((run / "extrema_results.json").read_text())
+    assert results["run_status"] == "failed"
+    assert len(results["failures"]) == 1
+    stderr = capsys.readouterr().err
+    assert "lowpass_6hz stopband edge" in stderr
+    assert "Nyquist frequency 8 Hz" in stderr
 
 
 def test_run_plots_every_violating_window_for_explicitly_selected_sources(
@@ -407,6 +504,7 @@ def test_named_run_arguments_save_the_same_complete_configuration(
         "lower_bound_deg": -1.0,
         "upper_bound_deg": 1.0,
         "cutoff_frequencies_hz": [],
+        "filter_family": "butterworth",
         "violation_plot_input_paths": [],
         "save_filtered_csv": True,
         "allow_external_input": False,
@@ -422,6 +520,10 @@ def test_named_run_arguments_save_the_same_complete_configuration(
         ({"input_paths": ["x"]}, "run_name"),
         ({"run_name": "x", "input_paths": "x"}, "non-empty array"),
         ({"run_name": "x", "input_paths": ["x"], "extra": True}, "unknown"),
+        (
+            {"run_name": "x", "input_paths": ["x"], "filter_family": False},
+            "filter_family",
+        ),
         (
             {"run_name": "x", "input_paths": ["x"], "force": "yes"},
             "boolean",
