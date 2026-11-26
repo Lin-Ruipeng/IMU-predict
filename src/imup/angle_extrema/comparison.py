@@ -16,7 +16,13 @@ from typing import cast
 import numpy as np
 import numpy.typing as npt
 
-from imup.angle_extrema.core import AngleExtremaError
+from imup.angle_extrema.core import AngleExtremaError, read_json_object
+from imup.angle_extrema.filtering import (
+    DEFAULT_FILTER_FAMILY,
+    comparison_reference_label,
+    filter_specification,
+    read_filter_family,
+)
 from imup.preprocessing import find_repository_root
 
 FloatArray = npt.NDArray[np.float64]
@@ -27,7 +33,9 @@ _ECDF_PERCENTILES = (0.5, 0.9, 0.95, 0.99)
 _COMPARATOR_COLORS = {
     "raw": "#4D4D4D",
     "lowpass_3hz": "#CC79A7",
+    "lowpass_4hz": "#56B4E9",
     "lowpass_5hz": "#E69F00",
+    "lowpass_6hz": "#68228B",
     "lowpass_7hz": "#009E73",
     "lowpass_9hz": "#D55E00",
 }
@@ -185,7 +193,16 @@ def run_angle_comparison(
             "comparison directory already exists; rerun with force=true to replace it",
             path=output_dir,
         )
-    sources = _analysis_sources(source_run, root)
+    analysis_config_path = source_run / "analysis_config.json"
+    analysis_config = read_json_object(
+        analysis_config_path, "source analysis configuration"
+    )
+    filter_family = read_filter_family(
+        analysis_config.get("filter_family", DEFAULT_FILTER_FAMILY),
+        path=analysis_config_path,
+    )
+    target_label = comparison_reference_label(filter_family, config.target_cutoff_hz)
+    sources = _analysis_sources(analysis_config_path, analysis_config, root)
     if not sources:
         raise AngleExtremaError(
             "analysis run contains no resolved input files", path=source_run
@@ -270,8 +287,8 @@ def run_angle_comparison(
                         target.rows[:, 3],
                         target.rows[:, :3],
                         comparator.rows[:, :3],
-                        target_label=f"Target Integrated Angle ({config.target_cutoff_hz:g} Hz)",
-                        comparator_label=_variant_label(variant),
+                        target_label=target_label,
+                        comparator_variant=variant,
                         title="Without delay compensation",
                         y_limits=y_limits,
                     )
@@ -280,8 +297,8 @@ def run_angle_comparison(
                         aligned_time,
                         aligned_target,
                         aligned_comparator,
-                        target_label=f"Target Integrated Angle ({config.target_cutoff_hz:g} Hz)",
-                        comparator_label=_variant_label(variant),
+                        target_label=target_label,
+                        comparator_variant=variant,
                         title="With estimated delay compensation",
                         y_limits=y_limits,
                     )
@@ -313,6 +330,7 @@ def run_angle_comparison(
                     _plot_absolute_error_ecdf(
                         source_output / "absolute_error_ecdf.png",
                         error_series,
+                        target_label=target_label,
                         percentile_guides=config.error_ecdf_percentile_guides,
                     )
                     absolute_error_summary.extend(
@@ -342,7 +360,7 @@ def run_angle_comparison(
                 temporary_dir / "absolute_error_summary.csv",
                 absolute_error_summary,
             )
-        _write_readme(temporary_dir / "README.md", config)
+        _write_readme(temporary_dir / "README.md", config, filter_family)
         _write_json(
             temporary_dir / "comparison_results.json",
             {
@@ -421,22 +439,16 @@ def _validate_config(config: ComparisonConfig) -> None:
             raise AngleExtremaError(f"{boolean_name} must be a boolean")
 
 
-def _analysis_sources(source_run: Path, root: Path) -> list[Path]:
-    config_path = source_run / "analysis_config.json"
-    try:
-        payload: object = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise AngleExtremaError(
-            f"could not read source analysis configuration: {error}", path=config_path
-        ) from error
-    if not isinstance(payload, dict) or not isinstance(
-        payload.get("input_paths"), list
-    ):
+def _analysis_sources(
+    config_path: Path, config: Mapping[str, object], root: Path
+) -> list[Path]:
+    input_paths = config.get("input_paths")
+    if not isinstance(input_paths, list):
         raise AngleExtremaError(
             "source analysis configuration has invalid input_paths", path=config_path
         )
     sources: list[Path] = []
-    for value in payload["input_paths"]:
+    for value in input_paths:
         if not isinstance(value, str) or not value:
             raise AngleExtremaError(
                 "source analysis input_paths must contain non-empty strings",
@@ -636,7 +648,7 @@ def _plot_comparison(
     comparator: FloatArray,
     *,
     target_label: str,
-    comparator_label: str,
+    comparator_variant: str,
     title: str,
     y_limits: list[tuple[float, float]],
 ) -> None:
@@ -648,6 +660,7 @@ def _plot_comparison(
 
     sns.set_theme(style="whitegrid", context="notebook", palette="colorblind")
     palette = sns.color_palette("colorblind")
+    comparator_color = _COMPARATOR_COLORS.get(comparator_variant)
     figure, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
     try:
         for index, axis_name in enumerate(_AXES):
@@ -661,16 +674,16 @@ def _plot_comparison(
             axes[index].plot(
                 elapsed,
                 comparator[:, index],
-                color=palette[1],
+                color=comparator_color or palette[1],
                 linewidth=1.6,
                 linestyle=(0, (8, 2)),
-                label=comparator_label,
+                label=_variant_label(comparator_variant),
             )
             axes[index].fill_between(
                 elapsed,
                 target[:, index],
                 comparator[:, index],
-                color=palette[2],
+                color=comparator_color or palette[2],
                 alpha=0.12,
                 linewidth=0,
             )
@@ -690,6 +703,7 @@ def _plot_absolute_error_ecdf(
     destination: Path,
     series: list[_AbsoluteErrorSeries],
     *,
+    target_label: str,
     percentile_guides: bool,
 ) -> None:
     import matplotlib
@@ -742,7 +756,10 @@ def _plot_absolute_error_ecdf(
             axis.set_ylabel("ECDF")
             axis.set_title(f"{axis_name.upper()} axis", loc="left")
             axis.legend(loc="lower right", fontsize="small")
-        figure.suptitle("Absolute Error ECDF — Delay Compensated and Anchor-relative")
+        figure.suptitle(
+            "Absolute Error ECDF — Delay Compensated and Anchor-relative\n"
+            f"Reference: {target_label}"
+        )
         figure.tight_layout()
         destination.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(destination, dpi=180, format="png")
@@ -875,7 +892,9 @@ def _write_absolute_error_summary_csv(
         writer.writerows(records)
 
 
-def _write_readme(destination: Path, config: ComparisonConfig) -> None:
+def _write_readme(
+    destination: Path, config: ComparisonConfig, filter_family: str
+) -> None:
     error_ecdf = ""
     if config.error_ecdf:
         guides = (
@@ -891,10 +910,22 @@ def _write_readme(destination: Path, config: ComparisonConfig) -> None:
             "inverse-ECDF p50/p90/p95/p99 and maximum errors."
             f"{guides}"
         )
+    spec = filter_specification(filter_family, (config.target_cutoff_hz,))
+    filtered_signal = str(spec["filtered_signal"]).replace("_", " ")
+    reference = (
+        f"{comparison_reference_label(filter_family, config.target_cutoff_hz)}, "
+        f"order {spec['order']}, causal filtering of {filtered_signal}."
+    )
+    if filter_family == "elliptic":
+        reference += (
+            f" Passband ripple {spec['passband_ripple_db']} dB, "
+            f"stopband attenuation {spec['stopband_attenuation_db']} dB."
+        )
+    else:
+        reference += " Butterworth low-pass."
     destination.write_text(
         "# Target integrated angle comparisons\n\n"
-        f"Target: {config.target_cutoff_hz:g} Hz fourth-order causal Butterworth "
-        "integrated angle.\n\n"
+        f"Reference: {reference}\n\n"
         "`estimated_shift_ms` is one shared tri-axis best-fit translation per "
         "source and comparator. Positive values delay the comparator; negative "
         "values advance it. The estimator maximizes normalized correlation of "

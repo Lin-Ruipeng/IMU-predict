@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -22,6 +22,33 @@ class AngleExtremaError(Exception):
     def __init__(self, message: str, *, path: Path | None = None) -> None:
         super().__init__(message)
         self.path = path
+
+
+def window_row_bounds(
+    row_count: int,
+    sample_interval_s: float,
+    window_duration_s: float,
+    stride_duration_s: float,
+) -> Iterator[tuple[int, int]]:
+    """Yield the inclusive start and exclusive stop rows of each complete window."""
+    width = math.ceil(window_duration_s / sample_interval_s)
+    stride = math.ceil(stride_duration_s / sample_interval_s)
+    for start in range(0, row_count - width + 1, stride):
+        yield start, start + width
+
+
+def read_json_object(path: Path, description: str) -> dict[str, object]:
+    try:
+        payload: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise AngleExtremaError(
+            f"could not read {description}: {error}", path=path
+        ) from error
+    if not isinstance(payload, dict) or not all(
+        isinstance(key, str) for key in payload
+    ):
+        raise AngleExtremaError(f"{description} must contain one object", path=path)
+    return cast(dict[str, object], payload)
 
 
 @dataclass(frozen=True)

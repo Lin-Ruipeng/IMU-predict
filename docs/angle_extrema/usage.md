@@ -2,15 +2,13 @@
 
 The `angle_extrema` module finds integrated-angle windows whose window-relative
 angle crosses configured bounds. It consumes the headerless
-`x_deg,y_deg,z_deg,elapsed_s` files produced by preprocessing; it never
-reintegrates angular velocity. See [`GLOSSARY.md`](../../GLOSSARY.md) for the
+`x_deg,y_deg,z_deg,elapsed_s` files produced by preprocessing.
+See [`GLOSSARY.md`](../../GLOSSARY.md) for the
 domain terms and [`docs/windowing.md`](../windowing.md) for the project-wide
 window discretization contract.
 
-Use `uv run imup extrema --help`, `uv run imup extrema select --help`,
-`uv run imup extrema run --help`, `uv run imup extrema compare --help`, and
-`uv run imup extrema compare-violations --help` for the authoritative command
-reference.
+Use `uv run imup extrema --help` to list commands. Each command has its own
+`--help`, including `uv run imup extrema compare-windows --help`.
 
 ## Select representative inputs
 
@@ -67,6 +65,7 @@ A formal run configuration contains every effective parameter:
   "lower_bound_deg": -1.0,
   "upper_bound_deg": 1.0,
   "cutoff_frequencies_hz": [11.0, 9.0, 7.0, 5.0, 3.0],
+  "filter_family": "butterworth",
   "violation_plot_input_paths": [],
   "save_filtered_csv": true,
   "allow_external_input": false,
@@ -96,6 +95,7 @@ uv run imup extrema run \
   --stride-duration-s 0.5 \
   --lower-bound-deg -1 \
   --upper-bound-deg 1 \
+  --filter-family butterworth \
   --cutoff-frequencies-hz 11 9 7 5 3
 ```
 
@@ -126,11 +126,12 @@ invalid input.
 
 ## Causal filtering
 
-Each configured cutoff creates a fourth-order Butterworth low-pass filter in
-second-order-section form. `scipy.signal.sosfilt` processes the complete signal
-before windowing, independently for each axis, with a first-sample steady-state
-initial condition. The operation is causal: it uses no future samples, applies
-no zero-phase correction, and retains the real filter delay.
+The default `filter_family: "butterworth"` (or `--filter-family butterworth`)
+applies a fourth-order Butterworth low-pass to the integrated angle. Both
+filter families process the complete source before windowing, independently
+per axis, using causal second-order sections and first-sample steady-state
+initial conditions. A saved configuration without `filter_family` uses the
+Butterworth default.
 
 A cutoff must be positive, unique, and lower than the file's Nyquist frequency.
 An invalid file/cutoff variant is recorded as a failure while other files and
@@ -141,6 +142,41 @@ Angle**, the model's only prediction target. Raw integrated angle and all other
 cutoffs are diagnostic variants. See
 [`filter-delay-report.md`](filter-delay-report.md) for measured delay ranges and
 the estimated alignment contract.
+
+### Elliptic experiment
+
+Set `filter_family: "elliptic"` or pass `--filter-family elliptic`.
+The [reference screenshot](elliptic-filter-spec-reference.jpg) specifies
+seventh-order elliptic filtering, up to 0.1 dB of passband ripple and at
+least 60 dB of stopband attenuation, with these two examples:
+
+| Passband edge | Stopband edge in the screenshot |
+| ---: | ---: |
+| 3 Hz | 4.091 Hz |
+| 5 Hz | 6.818 Hz |
+
+Both examples agree with a stopband edge of `passband_hz × 15/11` to the
+reported precision. The experiment applies that inferred rule to all edges.
+For example, the stopband starts at approximately 5.455 Hz for the 4 Hz
+variant, 8.182 Hz for the 6 Hz variant, and 15 Hz for the 11 Hz reference.
+In elliptic mode, the values in `cutoff_frequencies_hz` are passband edges.
+Both edges must fall below Nyquist. Each source and frequency must meet the
+design constraints at order seven.
+
+The elliptic path differentiates the preprocessed angle by taking adjacent
+differences and dividing by the fixed sample interval. This recovers the
+angular velocity used by the [preprocessing integration](../preprocessing/data-format.md).
+It filters that complete velocity sequence, then integrates with the original
+first angle and time grid. This follows the order shown in the screenshot.
+The Butterworth path applies its filter after integration. Windows in both
+paths share the state carried through the full source.
+
+For the q50 experiment, use the selected input CSVs from the q50 selection,
+`window_duration_s: 5`, `stride_duration_s: 5`, bounds of ±0.1°, cutoffs
+`[11, 9, 7, 6, 5, 4, 3]`, and `save_filtered_csv: true`.
+Use the 11 Hz elliptic result as the experiment reference. The prediction
+target defined in [ADR 0002](../adr/0002-use-11hz-causal-integrated-angle-as-prediction-target.md)
+continues to use the default Butterworth design.
 
 ## Compare angle variants with the target
 
@@ -348,6 +384,44 @@ shift, signed query interval, coverage status, and image path. Existing output
 requires explicit `force: true`; replacement affects only
 `target_violation_windows/`.
 
+## Compare every complete analysis window
+
+`extrema compare-windows` uses the saved run's window and stride, the same
+target grid, and the comparator shifts previously published by
+`extrema compare`. It produces one three-axis PNG per complete window and
+configured comparator. It marks any axes outside the target bounds and reports
+partial coverage using the same rules as the violation-window command.
+
+The named invocation below compares the seven diagnostic variants from the
+q50 elliptic run. The first command also produces 17 ECDFs with percentile guides.
+
+```bash
+uv run imup extrema compare \
+  --analysis-run-name q50-elliptic-5s \
+  --comparison-name q50-elliptic-5s-target-angle \
+  --target-cutoff-hz 11 \
+  --comparison-cutoff-frequencies-hz 3 4 5 6 7 9 \
+  --include-raw --error-ecdf --error-ecdf-percentile-guides
+uv run imup extrema compare-windows \
+  --analysis-run-name q50-elliptic-5s \
+  --comparison-name q50-elliptic-5s-target-angle
+```
+
+Pass the following JSON object through `compare-windows --config <path>`
+instead of the named arguments:
+
+```json
+{
+  "comparison_name": "q50-elliptic-5s-target-angle",
+  "analysis_run_name": "q50-elliptic-5s",
+  "force": false
+}
+```
+
+The `all_windows/` subtree of the comparison contains the normalized config,
+results, `window_comparisons.csv` index, and `sources/` images. Explicit
+`force: true` or `--force` replaces that subtree.
+
 ## Outputs
 
 Each run is published under:
@@ -381,7 +455,8 @@ segment means that at least one raw violating window covers that time. The
 timeline is generated for every successfully analyzed source and does not
 replace `raw_series.png`.
 
-`extrema_results.json` contains per-file/per-variant window summaries, one
+`extrema_results.json` contains the resolved filter specification,
+per-file/per-variant window summaries, one
 record for every violating window, all three axes' minima and maxima, violated
 axes/directions, failures, warnings, and a `succeeded` or `failed` run status.
 By default no violation-window images are generated. Paths listed in

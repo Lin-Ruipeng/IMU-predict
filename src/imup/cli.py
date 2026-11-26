@@ -18,8 +18,10 @@ from imup.angle_extrema import (
     run_angle_comparison,
     run_extrema_analysis,
     run_violation_comparison,
+    run_window_comparison,
     select_representative_files,
 )
+from imup.angle_extrema.filtering import DEFAULT_FILTER_FAMILY, FILTER_FAMILIES
 from imup.preprocessing import (
     PreprocessConfig,
     PreprocessingError,
@@ -138,6 +140,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="ordered causal low-pass cutoffs; pass no values for raw only",
     )
     run_parser.add_argument(
+        "--filter-family",
+        choices=FILTER_FAMILIES,
+        help="causal low-pass filter family (default: butterworth)",
+    )
+    run_parser.add_argument(
         "--violation-plot-input-paths",
         nargs="*",
         type=Path,
@@ -216,32 +223,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="atomically replace an existing comparison output",
     )
 
-    violation_compare_parser = extrema_subparsers.add_parser(
-        "compare-violations",
-        help="compare target violation windows after estimated delay compensation",
-    )
-    violation_compare_source = violation_compare_parser.add_mutually_exclusive_group(
-        required=True
-    )
-    violation_compare_source.add_argument(
-        "--config",
-        type=Path,
-        help="complete JSON target-violation comparison configuration",
-    )
-    violation_compare_source.add_argument(
-        "--analysis-run-name",
-        help="existing angle-extrema run containing target violation windows",
-    )
-    violation_compare_parser.add_argument(
-        "--comparison-name",
-        help="existing target-angle comparison containing shared delay estimates",
-    )
-    violation_compare_parser.add_argument(
-        "--force",
-        action="store_true",
-        default=None,
-        help="atomically replace only the target-violation comparison subtree",
-    )
+    for command, windows in (
+        ("compare-violations", "target violation windows"),
+        ("compare-windows", "all complete analysis windows"),
+    ):
+        window_parser = extrema_subparsers.add_parser(
+            command, help=f"compare {windows} after estimated delay compensation"
+        )
+        window_source = window_parser.add_mutually_exclusive_group(required=True)
+        window_source.add_argument(
+            "--config",
+            type=Path,
+            help="complete JSON window comparison configuration",
+        )
+        window_source.add_argument(
+            "--analysis-run-name", help="existing angle-extrema run"
+        )
+        window_parser.add_argument(
+            "--comparison-name",
+            help="existing angle comparison containing shared delay estimates",
+        )
+        window_parser.add_argument(
+            "--force",
+            action="store_true",
+            default=None,
+            help="atomically replace only this window comparison subtree",
+        )
     return parser
 
 
@@ -363,6 +370,7 @@ def _run_extrema_analysis(
         "lower_bound_deg",
         "upper_bound_deg",
         "cutoff_frequencies_hz",
+        "filter_family",
         "violation_plot_input_paths",
         "save_filtered_csv",
         "allow_external_input",
@@ -395,6 +403,7 @@ def _run_extrema_analysis(
                 if args.cutoff_frequencies_hz is None
                 else tuple(args.cutoff_frequencies_hz)
             ),
+            filter_family=args.filter_family or DEFAULT_FILTER_FAMILY,
             violation_plot_input_paths=(
                 ()
                 if args.violation_plot_input_paths is None
@@ -491,7 +500,7 @@ def _run_extrema_comparison(
     return result.exit_code
 
 
-def _run_violation_comparison(
+def _run_window_comparison(
     args: argparse.Namespace,
     parser: argparse.ArgumentParser,
 ) -> int:
@@ -500,9 +509,7 @@ def _run_violation_comparison(
     override_names = ("analysis_run_name", "comparison_name", "force")
     if config_path is not None:
         if any(getattr(args, name) is not None for name in override_names):
-            parser.error(
-                "--config cannot be combined with target-violation comparison overrides"
-            )
+            parser.error("--config cannot be combined with window comparison overrides")
         config = load_violation_comparison_config(
             config_path, repository_root=repository_root
         )
@@ -517,14 +524,17 @@ def _run_violation_comparison(
             analysis_run_name=str(args.analysis_run_name),
             force=False if args.force is None else bool(args.force),
         )
-    result = run_violation_comparison(config, repository_root=repository_root)
+    if args.extrema_command == "compare-windows":
+        result = run_window_comparison(config, repository_root=repository_root)
+        message = "published complete window comparisons"
+    else:
+        result = run_violation_comparison(config, repository_root=repository_root)
+        message = "published target violation comparisons"
     for warning in result.warnings:
         _print_diagnostic("WARNING", warning.path, warning.message)
     for failure in result.failures:
         _print_diagnostic("ERROR", failure.path, failure.message)
-    _print_diagnostic(
-        "INFO", result.output_dir, "published target violation comparisons"
-    )
+    _print_diagnostic("INFO", result.output_dir, message)
     print(
         "SUMMARY: "
         f"processed={result.processed_sources} "
@@ -550,8 +560,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_extrema_analysis(args, parser)
         if args.command == "extrema" and args.extrema_command == "compare":
             return _run_extrema_comparison(args, parser)
-        if args.command == "extrema" and args.extrema_command == "compare-violations":
-            return _run_violation_comparison(args, parser)
+        if args.command == "extrema" and args.extrema_command in (
+            "compare-violations",
+            "compare-windows",
+        ):
+            return _run_window_comparison(args, parser)
     except (PreprocessingError, AngleExtremaError) as error:
         _print_diagnostic("ERROR", error.path, str(error))
         return 2

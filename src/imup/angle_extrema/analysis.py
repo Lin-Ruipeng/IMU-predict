@@ -15,9 +15,14 @@ from typing import cast
 
 import numpy as np
 import numpy.typing as npt
-from scipy import signal  # type: ignore[import-untyped]
 
-from imup.angle_extrema.core import AngleExtremaError
+from imup.angle_extrema.core import AngleExtremaError, window_row_bounds
+from imup.angle_extrema.filtering import (
+    DEFAULT_FILTER_FAMILY,
+    filter_angle_rows,
+    filter_specification,
+    read_filter_family,
+)
 from imup.preprocessing import find_repository_root
 
 FloatArray = npt.NDArray[np.float64]
@@ -34,6 +39,7 @@ _ALLOWED_CONFIG_KEYS = frozenset(
         "lower_bound_deg",
         "upper_bound_deg",
         "cutoff_frequencies_hz",
+        "filter_family",
         "violation_plot_input_paths",
         "save_filtered_csv",
         "allow_external_input",
@@ -57,6 +63,7 @@ class AnalysisConfig:
     save_filtered_csv: bool = True
     allow_external_input: bool = False
     force: bool = False
+    filter_family: str = DEFAULT_FILTER_FAMILY
 
 
 @dataclass(frozen=True)
@@ -163,6 +170,9 @@ def load_analysis_config(
             resolved_path,
         ),
         cutoff_frequencies_hz=cutoffs,
+        filter_family=read_filter_family(
+            values.get("filter_family", DEFAULT_FILTER_FAMILY), path=resolved_path
+        ),
         violation_plot_input_paths=violation_paths,
         save_filtered_csv=_boolean(
             values.get("save_filtered_csv", True),
@@ -252,19 +262,21 @@ def run_extrema_analysis(
                     )
                 for cutoff_hz in config.cutoff_frequencies_hz:
                     variant = f"lowpass_{_cutoff_slug(cutoff_hz)}hz"
-                    nyquist_hz = 0.5 / data.sample_interval_s
-                    if cutoff_hz >= nyquist_hz:
+                    try:
+                        filtered = _AngleData(
+                            rows=filter_angle_rows(
+                                data.rows,
+                                data.sample_interval_s,
+                                cutoff_hz,
+                                config.filter_family,
+                            ),
+                            sample_interval_s=data.sample_interval_s,
+                        )
+                    except (AngleExtremaError, ValueError, OverflowError) as error:
                         failures.append(
-                            AnalysisDiagnostic(
-                                source,
-                                (
-                                    f"{variant} cutoff must be below Nyquist "
-                                    f"frequency {nyquist_hz:.12g} Hz"
-                                ),
-                            )
+                            AnalysisDiagnostic(source, f"{variant} {error}")
                         )
                         continue
-                    filtered = _causal_lowpass(data, cutoff_hz)
                     if config.save_filtered_csv:
                         _write_csv(
                             source_output / "filtered" / f"{variant}.csv",
@@ -299,6 +311,9 @@ def run_extrema_analysis(
 
         results = {
             "run_status": "failed" if failures else "succeeded",
+            "filter": filter_specification(
+                config.filter_family, config.cutoff_frequencies_hz
+            ),
             "summaries": summaries,
             "violations": violations,
             "failures": [
@@ -335,6 +350,7 @@ def run_extrema_analysis(
 
 
 def _validate_config(config: AnalysisConfig) -> None:
+    read_filter_family(config.filter_family)
     if not _RUN_NAME.fullmatch(config.run_name):
         raise AngleExtremaError(
             "run_name must start with an ASCII letter or number and may then "
@@ -509,14 +525,17 @@ def _analyze_variant(
     config: AnalysisConfig,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     del source
-    width = math.ceil(config.window_duration_s / data.sample_interval_s)
-    stride = math.ceil(config.stride_duration_s / data.sample_interval_s)
-    starts = range(0, max(0, data.rows.shape[0] - width + 1), stride)
+    bounds = window_row_bounds(
+        data.rows.shape[0],
+        data.sample_interval_s,
+        config.window_duration_s,
+        config.stride_duration_s,
+    )
     records: list[dict[str, object]] = []
     total = 0
-    for window_index, start in enumerate(starts):
+    for window_index, (start, stop) in enumerate(bounds):
         total += 1
-        window = data.rows[start : start + width, :3]
+        window = data.rows[start:stop, :3]
         relative = window - window[0]
         minima = np.min(relative, axis=0)
         maxima = np.max(relative, axis=0)
@@ -547,7 +566,7 @@ def _analyze_variant(
                 "start_row": start,
                 "start_elapsed_s": _clean_float(start_elapsed),
                 "end_elapsed_s_exclusive": _clean_float(
-                    start_elapsed + width * data.sample_interval_s
+                    start_elapsed + (stop - start) * data.sample_interval_s
                 ),
                 "axis_extrema": extrema,
                 "violations": violation_axes,
@@ -563,29 +582,6 @@ def _analyze_variant(
             "violating_windows": len(records),
         },
         records,
-    )
-
-
-def _causal_lowpass(data: _AngleData, cutoff_hz: float) -> _AngleData:
-    sampling_frequency_hz = 1.0 / data.sample_interval_s
-    sections = signal.butter(
-        4,
-        cutoff_hz,
-        btype="lowpass",
-        fs=sampling_frequency_hz,
-        output="sos",
-    )
-    steady_state = signal.sosfilt_zi(sections)
-    filtered_rows = data.rows.copy()
-    for index in range(3):
-        filtered_rows[:, index], _ = signal.sosfilt(
-            sections,
-            data.rows[:, index],
-            zi=steady_state * data.rows[0, index],
-        )
-    return _AngleData(
-        rows=filtered_rows,
-        sample_interval_s=data.sample_interval_s,
     )
 
 
@@ -785,6 +781,7 @@ def _normalized_config(config: AnalysisConfig, root: Path) -> dict[str, object]:
         "lower_bound_deg": config.lower_bound_deg,
         "upper_bound_deg": config.upper_bound_deg,
         "cutoff_frequencies_hz": list(config.cutoff_frequencies_hz),
+        "filter_family": config.filter_family,
         "violation_plot_input_paths": [
             _display_path(path, root) for path in config.violation_plot_input_paths
         ],

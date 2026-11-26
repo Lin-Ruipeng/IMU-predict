@@ -26,6 +26,7 @@ from imup.angle_extrema.violation_comparison import (
     ViolationComparisonRunResult,
     load_violation_comparison_config,
     run_violation_comparison,
+    run_window_comparison,
 )
 
 __all__ = [
@@ -49,5 +50,6 @@ __all__ = [
     "run_extrema_analysis",
     "run_angle_comparison",
     "run_violation_comparison",
+    "run_window_comparison",
     "select_representative_files",
 ]
